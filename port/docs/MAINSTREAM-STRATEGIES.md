@@ -1,0 +1,69 @@
+# 值得从 mainstream Strata 借鉴的策略（按优先级）
+
+方法：直接读 `upstream/main` 的实现与文档 —— `src/ngram/ple_reader.cpp`、`src/prefill/prefill.cpp`、
+`src/spec/suffix_drafter.cpp`、`docs/GYRO.md`、`docs/EXPERTDEC.md`、`docs/BATCHED_DMA.md`、`docs/DISJOINT_EXPERT_CACHE.md`。
+每条都对照**本机实测**判断是否适用（Vulkan / ARM64 / 单 GPU / 47.6 GiB UMA）。
+
+## 1. 台账
+
+| # | mainstream 的做法 | 原文/位置 | 对本移植是否适用 | 本机依据 | 优先级 |
+| --- | --- | --- | --- | --- | --- |
+| **M1** | **配套“compat”包**：setup 用 `tools/iq_pack.py --compat-bf16` 把**稠密权重和 Hadamard 表**重打成 1.5 GB 的伴随文件，让它们走引擎自己的快内核 | `docs/GYRO.md` | ✅ **适用**（我们没有重打包步骤，稠密层走的是通用内核） | 稠密占每 token 字节的 **76%**（3.1 GiB / 4.1 GiB），Q5_K 72 GB/s、Q6_K 87 GB/s，而 trellis TQK6 也是 87 GB/s 但**每字节只 2.125 bit** | **P0** |
+| **M2** | **后缀查表草稿器**（trigram 索引、4 路、约 20 B/token、无权重、微秒级），命中即一次 verify 接受多 token | `src/spec/suffix_drafter.cpp` | ⚠️ 适用但**已测亏** | 本移植的 prompt-lookup 投机在混合架构上净亏 **8%**（回滚环成本），且"没找到可抄的续写" | P2 |
+| **M3** | **PLE 走独立的 direct-I/O 读器**：8 路组相联行缓存 + 异步 job 队列 + 分位数统计 | `src/ngram/ple_reader.cpp` | ✅ 部分已做 | 我们已经照搬**8 路 + mix 散列 + 组内轮转**；但实测 gather 只要 **22-29 µs/token**，异步队列与分位数统计**没有必要** | 完成 |
+| **M4** | **专家驻留/决策**（按预算把热专家留在 VRAM，verify 窗口用共享内存暂存激活） | `docs/EXPERTDEC.md`、`DISJOINT_EXPERT_CACHE.md` | ⚠️ 仅概念可借 | EXPERTDEC 是 CUDA kernel（`iq_kernels.cu`）；我们的 trellis matvec 已有"每行解一次、多列复用" | P3 |
+| **M5** | **自适应 prefill 分块/切点**（`prefill.cpp` 里一堆规则：switch point、plain floor、staged group…） | `src/prefill/prefill.cpp` | ✅ 适用（我们刚把 chunk 固定成 1024） | 固定 1024 已带来 **pp512 +25%**；自适应可能在小 prompt 上再多一点，但收益上限低 | P2 |
+| **M6** | **批量 DMA 提交**（`cudaMemcpyBatchAsync`） | `docs/BATCHED_DMA.md` | ❌ 不适用 | 本机提交 27 次共 **0.85 ms**；上游自己测到"提交延迟 −83%、总传输只 −1.3%、未证明生成变快" | 不做 |
+| **M7** | **双卡专家去重**（helper 与 primary 不重复占槽） | `DISJOINT_EXPERT_CACHE.md` | ❌ 不适用 | 单 GPU | 不做 |
+
+## 2. P0 详解：稠密层的配套重打包（M1 的本移植版本）
+
+### 2.1 为什么这是最大的杠杆
+
+Gyro-S 每 token 读 ≈4.1 GiB，其中：
+
+| 部分 | 字节 | 类型 | 孤立带宽 |
+| --- | --- | --- | --- |
+| 稠密（注意力/shared/输出等） | **≈3.1 GiB** | Q5_K 1.82 + Q6_K 0.50（输出）+ Q8_0 0.39 + 其它 | 72 / 87 / 42 GB/s |
+| 稀疏专家（10/512） | 0.47 GiB | TQK6 15.2 + TQK7 8.8（全表） | 87 GB/s |
+
+稠密占了四分之三，却跑在与专家同样的带宽上 ⇒ **把稠密层的字节数压下来是唯一能显著改变 decode 的动作**。
+
+### 2.2 方案（上游思路的本移植版）
+
+上游的 compat 包是**换格式以适配内核**（它们把稠密层放成 bf16 给自己的 GEMM）。本机的等价物是：
+**把稠密层重打成 trellis（TQK6/TQK7）**，因为
+
+- 本机 tqk6 的孤立带宽 **87 GB/s**（与 q6_K 并列最高），
+- 而 trellis 是 **2.125 bit/权重**，Q5_K 是 5.5 bit ⇒ **同样张量字节数降到 1/2.6**。
+
+理论收益：稠密 3.1 GiB → ≈1.2 GiB，稠密时间 ≈39 ms → ≈15 ms ⇒ token 103 ms → ≈78 ms ⇒ **+30-45% decode**。
+
+### 2.3 代价与边界
+
+- **画质**：稠密层从 5.5 bit 降到 2.125 bit，是有损的。必须给出**质量代理**（同一段文本的困惑度/对数似然对比），
+  并把 compat 包做成**可选**（默认不生成、不启用），与上游"setup 里显式准备"的做法一致。
+- **工作流整合**（用户要求）：重打包必须进 **CLI 与 desktop app**：
+  1. `port/tools/repack-compat.ps1`（或引擎子命令 `strata-vk --repack-compat <in> <out>`）产出伴随文件；
+  2. 引擎 `--compat <file>` 加载伴随文件、优先使用其中的稠密权重，缺失则回退原包；
+  3. app/CLI 的 setup 步骤调用它（`setup.py` 的 gyro 家族分支 + 一条显式提示）。
+- **可回退**：伴随文件不存在或版本不匹配时，一切行为与今天相同（必须保证 token 流在原包上不变）。
+
+### 2.4 实施顺序
+
+1. **选择性重打包工具**：读入 GGUF，只对稠密张量（非 `*_exps`、非 `per_layer_token_embd`）做 trellis 量化，写新 GGUF（保留原 metadata/专家）；
+2. **引擎加载伴随文件**：按张量名覆盖稠密权重（内存映射，不复制专家）；
+3. **质量代理 + A/B**：同 prompt 的 token 对数似然对比；decode/prefill 的 ABBA 判据；
+4. **工作流整合**：CLI 子命令 + `setup.py`/桌面 app 的入口与提示。
+
+## 3. 其余值得做的（P2/P3）
+
+- **P2 M5 自适应 chunk**：固定 1024 已是 +25%，自适应只在"prompt 远小于 1024"时有边际收益；低风险、可顺手做。
+- **P2 M2 后缀草稿**：本移植的 lookup 已经亏 8%；除非用上游的"trigram 索引 + 最长匹配 + 4 路候选"重写，否则不立项。
+- **P3 M4 专家热集持久化**：跨请求保留热专家（对 Gyro-M 92 GB 这类 >RAM 的包才有意义；Gyro-S 不适用）。
+
+## 4. 结论
+
+**下一阶段的目标定为 M1 的本移植版本：稠密层配套重打包（trellis）+ CLI/app 工作流整合。**
+它是唯一一条既能把每 token 字节数砍到 1/2.6、又与本机最快内核（87 GB/s）对齐的路线，代价是稠密层的画质，
+因此必须做成**可选伴随包**并提供质量代理与回退。
