@@ -1259,6 +1259,67 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_ffn(ggml_tensor * cur, co
     return cur;
 }
 
+// A row cache for the PLE table, shaped like the mainstream engine's src/ngram/ple_reader.cpp: ROWS-way set-associative
+// with a mix hash and round-robin replacement inside a set, so two rows that collide once do not evict each other for
+// good.  The table is far larger than RAM and mapped, so a miss is a page fault against the file; natural text repeats
+// tokens, which is what the cache is for.
+struct ple_row_cache {
+    static constexpr uint32_t WAYS = 8;
+    static constexpr uint32_t EMPTY = 0xFFFFFFFFu;
+
+    std::vector<uint32_t> keys;   // sets * WAYS
+    std::vector<uint8_t>  data;   // sets * WAYS * row_bytes
+    std::vector<uint8_t>  next;   // per-set replacement pointer
+    size_t   sets      = 0;
+    size_t   row_bytes = 0;
+    size_t   hits      = 0;
+    size_t   misses    = 0;
+
+    void init(size_t bytes_per_row, size_t budget_bytes) {
+        row_bytes = bytes_per_row;
+        sets      = bytes_per_row == 0 ? 0 : std::max<size_t>(1, budget_bytes / bytes_per_row / WAYS);
+        keys.assign(sets * WAYS, EMPTY);
+        data.assign(sets * WAYS * row_bytes, 0);
+        next.assign(sets, 0);
+    }
+
+    static uint64_t mix(uint32_t r) {
+        const uint64_t x = (uint64_t) r * 0x9E3779B97F4A7C15ull;
+        return x ^ (x >> 29);
+    }
+
+    const uint8_t * find(int64_t row) {
+        if (sets == 0 || row < 0 || row > INT32_MAX) {
+            return nullptr;
+        }
+        const size_t s = (size_t) (mix((uint32_t) row) % sets);
+        for (uint32_t w = 0; w < WAYS; ++w) {
+            if (keys[s * WAYS + w] == (uint32_t) row) {
+                ++hits;
+                return data.data() + (s * WAYS + w) * row_bytes;
+            }
+        }
+        return nullptr;
+    }
+
+    void insert(int64_t row, const uint8_t * bytes) {
+        if (sets == 0 || row < 0 || row > INT32_MAX) {
+            return;
+        }
+        const size_t s = (size_t) (mix((uint32_t) row) % sets);
+        const uint32_t w = next[s];
+        next[s] = (uint8_t) ((w + 1) % WAYS);
+        keys[s * WAYS + w] = (uint32_t) row;
+        std::memcpy(data.data() + (s * WAYS + w) * row_bytes, bytes, row_bytes);
+        ++misses;
+    }
+
+    double hit_rate() const {
+        const size_t n = hits + misses;
+        return n == 0 ? 0.0 : (double) hits / (double) n;
+    }
+};
+
 // PLE n-gram hash embedding: each token gathers ple_n_heads rows of a shared table.
 //   mixed_n = (t[p]*m[0]) ^ ... ^ (t[p-n+1]*m[n-1]);  row = mixed_n % vocab[h] + offset[h]
 // The hash runs host-side because ggml has no int64 and no xor. EOS resets the window.
@@ -1277,6 +1338,7 @@ public:
     }
 
     ggml_tensor * rows = nullptr;   // I32 [ple_n_heads * n_tokens]
+    ggml_tensor * emb  = nullptr;   // F32 [ple_head_dim * ple_n_heads, n_tokens]; filled on the host when non-null
 
     const llama_model & model;
 
@@ -1355,6 +1417,49 @@ void llm_graph_input_qwen4exp_ple::set_input(const llama_ubatch * ubatch) {
         if (prefetch) {
             llama_prefetch_rows(ple, idx.data(), idx.size());
         }
+
+        // Host gather through the row cache.  Numerically identical to the get_rows this replaces: the same to_float
+        // kernel dequantizes the same bytes, only the read path changes.
+        if (emb != nullptr && ple->data != nullptr) {
+            static ple_row_cache cache;
+            static const size_t cache_bytes = [] {
+                const char * s = std::getenv("STRATA_PLE_CACHE_MB");
+                const size_t mb = s != nullptr ? (size_t) std::max(0, std::atoi(s)) : 256;
+                return mb << 20;
+            }();
+            const size_t row_bytes = ggml_row_size(ple->type, ple->ne[0]);
+            if (cache.row_bytes != row_bytes) {
+                cache.init(row_bytes, cache_bytes);
+                LLAMA_LOG_INFO("%s: PLE row cache: %zu sets x %u ways of %zu B (%.0f MiB)\n", __func__, cache.sets,
+                               (unsigned) ple_row_cache::WAYS, row_bytes,
+                               (double) cache.sets * ple_row_cache::WAYS * (double) row_bytes / (1024.0 * 1024.0));
+            }
+
+            const auto * traits = ggml_get_type_traits(ple->type);
+            const int64_t ne0 = ple->ne[0];
+            std::vector<float> out((size_t) idx.size() * (size_t) ne0);
+
+            static const bool ple_log = std::getenv("STRATA_PLE_LOG") != nullptr;
+            const int64_t t0 = ple_log ? ggml_time_us() : 0;
+
+            const char * base = (const char *) ple->data;
+            for (size_t r = 0; r < idx.size(); ++r) {
+                const uint8_t * src = cache.find(idx[r]);
+                if (src == nullptr) {
+                    const uint8_t * from = (const uint8_t *) (base + (size_t) idx[r] * ple->nb[1]);
+                    cache.insert(idx[r], from);
+                    src = cache.find(idx[r]);   // re-probe: the insert may have evicted, but this row is now present
+                }
+                traits->to_float(src, out.data() + (size_t) r * (size_t) ne0, ne0);
+            }
+            ggml_backend_tensor_set(emb, out.data(), 0, out.size() * sizeof(float));
+            if (ple_log) {
+                fprintf(stderr, "[ple] rows=%zu sets=%zu hit=%.1f%% gather=%.3fms total_hit=%zu total_miss=%zu\n",
+                        idx.size(), cache.sets, 100.0 * cache.hit_rate(), (ggml_time_us() - t0) / 1000.0,
+                        cache.hits, cache.misses);
+            }
+            return;
+        }
     }
 
     ggml_backend_tensor_set(rows, idx.data(), 0, idx.size()*ggml_element_size(rows));
@@ -1401,11 +1506,21 @@ ggml_tensor * llama_model_qwen4exp::graph::build_inp_ple(
     ple_inp->rows = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_heads * n_tokens);
     ggml_set_input(ple_inp->rows);
     ggml_tensor * rows = ple_inp->rows;
-    res->add_input(std::move(ple_inp));
 
-    // gather then flatten the heads: get_rows lays the head dimension out slowest, as the reference does
-    ggml_tensor * emb = ggml_get_rows(ctx0, model.per_layer_tok_embd, rows);
-    emb = ggml_reshape_2d(ctx0, emb, hparams.ple_head_dim * n_heads, n_tokens);
+    // The rows live in a mapped table far larger than RAM, so the gather runs on the host through a row cache and the
+    // graph receives the flattened result directly: same values, no page faults inside the graph.  The get_rows path
+    // stays for a table whose type has no to_float kernel.
+    ggml_tensor * emb = nullptr;
+    if (ggml_get_type_traits(model.per_layer_tok_embd->type)->to_float != nullptr) {
+        ple_inp->emb = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.ple_head_dim * n_heads, n_tokens);
+        ggml_set_input(ple_inp->emb);
+        emb = ple_inp->emb;
+    } else {
+        // gather then flatten the heads: get_rows lays the head dimension out slowest, as the reference does
+        emb = ggml_get_rows(ctx0, model.per_layer_tok_embd, rows);
+        emb = ggml_reshape_2d(ctx0, emb, hparams.ple_head_dim * n_heads, n_tokens);
+    }
+    res->add_input(std::move(ple_inp));
     cb(emb, "ple_embd", -1);
 
     return emb;
