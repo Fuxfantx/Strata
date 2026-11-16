@@ -1,0 +1,157 @@
+        }
+    ));
+    add_opt(common_arg(
+        {"-lcs", "--lookup-cache-static"}, "FNAME",
+        "path to static lookup cache to use for lookup decoding (not updated by generation)",
+        [](common_params & params, const std::string & value) {
+            params.speculative.ngram_cache.lookup_cache_static = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"-lcd", "--lookup-cache-dynamic"}, "FNAME",
+        "path to dynamic lookup cache to use for lookup decoding (updated by generation)",
+        [](common_params & params, const std::string & value) {
+
+---
+
+        }
+    ).set_examples({LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"-lcd", "--lookup-cache-dynamic"}, "FNAME",
+        "path to dynamic lookup cache to use for lookup decoding (updated by generation)",
+        [](common_params & params, const std::string & value) {
+            params.speculative.ngram_cache.lookup_cache_dynamic = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"-c", "--ctx-size"}, "N",
+        string_format("size of the prompt context (default: %d, 0 = loaded from model)", params.n_ctx),
+        [](common_params & params, int value) {
+
+---
+
+    ).set_env("LLAMA_ARG_LOAD_MODE"));
+    add_opt(common_arg(
+        {"-lzm", "--lazy-mode"}, "MODE",
+        "on-demand reading of certain tensors, for example per-layer embeddings (default: auto)\n"
+        "- on: read the rows of such tensors from disk on demand instead of keeping them resident (requires mmap)\n"
+        "- on-direct: like on, but the qwen4exp n-gram table is read with explicit positional reads\n"
+        "  (direct I/O unless --no-ngram-direct-io) instead of through the mmap; same as on + --ngram-on-disk\n"
+        "- auto: on, but only for tensors larger than 4 GiB\n"
+        "- off: always keep them resident",
+        [](common_params & params, const std::string & value) {
+            /**/ if (value == "on")   { params.lazy_mode = LLAMA_LAZY_MODE_ON;   }
+            else if (value == "on-direct") { params.lazy_mode = LLAMA_LAZY_MODE_ON; params.ple_on_disk = true; }
+            else if (value == "auto") { params.lazy_mode = LLAMA_LAZY_MODE_AUTO; }
+
+---
+
+        {"-ot", "--override-tensor"}, "<tensor name pattern>=<buffer type>,...",
+        "override tensor buffer type", [](common_params & params, const std::string & value) {
+            parse_tensor_buffer_overrides(value, params.tensor_buft_overrides);
+        }
+    ).set_env("LLAMA_ARG_OVERRIDE_TENSOR"));
+    add_opt(common_arg(
+        {"--ngram-on-disk"},
+        "keep the model's n-gram hash-embedding table (per_layer_token_embd, 28.8 GB on Qwen3.8-Flash-Next)\n"
+        "on disk: it is never mapped or loaded, each batch reads just the rows it gathers from the GGUF.\n"
+        "The n-gram half of --lazy-mode on-direct. If the reader can't start, the table falls back to\n"
+        "--lazy-mode on reads through the mmap. Only qwen4exp has such a table; on any other model this is a no-op",
+        [](common_params & params) {
+            params.ple_on_disk = true;
+
+---
+
+        }
+    ).set_env("LLAMA_ARG_NGRAM_ON_DISK"));
+    add_opt(common_arg(
+        {"-mp", "--model-ple"}, "FNAME",
+        "read the n-gram hash-embedding table (per_layer_token_embd) from this GGUF instead of\n"
+        "the main model file, so different tables can be tested without requantizing the rest\n"
+        "of the model. Implies --ngram-on-disk. qwen4exp only, joined table layout only\n"
+        "(default: read the table from the main model file)",
+        [](common_params & params, const std::string & value) {
+            params.path_ple = value;
+        }
+    ).set_env("LLAMA_ARG_MODEL_PLE"));
+    add_opt(common_arg(
+
+---
+
+        [](common_params & params, const std::string & value) {
+            params.path_ple = value;
+        }
+    ).set_env("LLAMA_ARG_MODEL_PLE"));
+    add_opt(common_arg(
+        {"--ngram-io-threads"}, "N",
+        string_format("threads reading n-gram rows for --ngram-on-disk (default: %d)", params.ple_io_threads),
+        [](common_params & params, int value) {
+            params.ple_io_threads = value;
+        }
+    ).set_env("LLAMA_ARG_NGRAM_IO_THREADS"));
+    add_opt(common_arg(
+        {"--ngram-cache"}, "MiB",
+
+---
+
+        }
+    ).set_env("LLAMA_ARG_MODEL_PLE"));
+    add_opt(common_arg(
+        {"--ngram-io-threads"}, "N",
+        string_format("threads reading n-gram rows for --ngram-on-disk (default: %d)", params.ple_io_threads),
+        [](common_params & params, int value) {
+            params.ple_io_threads = value;
+        }
+    ).set_env("LLAMA_ARG_NGRAM_IO_THREADS"));
+    add_opt(common_arg(
+        {"--ngram-cache"}, "MiB",
+        string_format("in-memory cache of recently read n-gram rows for --ngram-on-disk, 0 disables (default: %d)", params.ple_cache_mb),
+        [](common_params & params, int value) {
+
+---
+
+        [](common_params & params, int value) {
+            params.ple_io_threads = value;
+        }
+    ).set_env("LLAMA_ARG_NGRAM_IO_THREADS"));
+    add_opt(common_arg(
+        {"--ngram-cache"}, "MiB",
+        string_format("in-memory cache of recently read n-gram rows for --ngram-on-disk, 0 disables (default: %d)", params.ple_cache_mb),
+        [](common_params & params, int value) {
+            params.ple_cache_mb = value;
+        }
+    ).set_env("LLAMA_ARG_NGRAM_CACHE"));
+    add_opt(common_arg(
+        {"--ngram-direct-io"},
+
+---
+
+        }
+    ).set_env("LLAMA_ARG_NGRAM_IO_THREADS"));
+    add_opt(common_arg(
+        {"--ngram-cache"}, "MiB",
+        string_format("in-memory cache of recently read n-gram rows for --ngram-on-disk, 0 disables (default: %d)", params.ple_cache_mb),
+        [](common_params & params, int value) {
+            params.ple_cache_mb = value;
+        }
+    ).set_env("LLAMA_ARG_NGRAM_CACHE"));
+    add_opt(common_arg(
+        {"--ngram-direct-io"},
+        {"--no-ngram-direct-io"},
+        string_format("read n-gram rows with O_DIRECT (FILE_FLAG_NO_BUFFERING on Windows) so they bypass the page cache (default: %s)", params.ple_direct_io ? "enabled" : "disabled"),
+
+---
+
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--simple-io"},
+        "use basic IO for better compatibility in subprocesses and limited consoles",
+        [](common_params & params) {
+            params.simple_io = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--positive-file"}, "FNAME",
+        string_format("positive prompts file, one prompt per line (default: '%s')", params.cvector_positive_file.c_str()),
+        [](common_params & params, const std::string & value) {

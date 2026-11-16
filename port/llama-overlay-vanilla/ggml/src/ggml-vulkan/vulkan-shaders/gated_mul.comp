@@ -1,0 +1,31 @@
+// gated_mul.comp - out[e,t] = x[e,t] * sigmoid(gate[e or 0, t])
+//
+// One dispatch for what the graph otherwise emits as UNARY(sigmoid) followed by MUL.  The backend can only fuse those
+// when they are adjacent in the graph, and the graph builder schedules sibling consumers between them often enough that
+// it does not happen (port/docs/OPTIMIZATION-BACKLOG.md, phase 5).  The gate is broadcast exactly like ggml_mul's second
+// operand: one value per row of ne0 (gne0 == 1) or per element (gne0 == ne0), indexed by the row index t.
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform parameter {
+    uint n;        // elements of x
+    uint ne0;      // x->ne[0]
+    uint ne1;      // x->ne[1]
+    uint gne0;     // gate->ne[0]
+} p;
+
+layout(binding = 0, std430) readonly  buffer X { float data_x[]; };
+layout(binding = 1, std430) readonly  buffer G { float data_g[]; };
+layout(binding = 2, std430) writeonly buffer D { float data_d[]; };
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= p.n) {
+        return;
+    }
+    const uint e = i % p.ne0;
+    const uint t = (i / p.ne0) % p.ne1;
+    const uint g = p.gne0 == 1u ? t : (t * p.gne0 + e);
+    data_d[i] = data_x[i] * (1.0f / (1.0f + exp(-data_g[g])));
+}

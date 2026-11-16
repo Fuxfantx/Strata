@@ -95,3 +95,17 @@ node_modules/
 /build-spark/
 /build-vision-spark/
 /.venv-build/
+
+# The port's out-of-tree tooling: RenderDoc (x64, downloaded), the x64 build of it, the python used for the bindings,
+# captures, and the fetched OpenCL headers.  None of it is source.
+/captures/
+/tools/rd/
+/tools/rd-build/
+/tools/rdoc/
+/tools/rdx64/
+/tools/pydeps/
+/tools/build_log*.txt
+/third_party/opencl/
+# the fetched llama.cpp trees (production: third_party/llama.cpp; a leftover of an older pin is not source)
+/third_party/llama.cpp/
+/third_party/llama.cpp.oldpin/
