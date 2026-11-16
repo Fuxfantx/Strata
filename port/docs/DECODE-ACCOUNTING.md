@@ -50,17 +50,46 @@ Q2_0 的 prefill 随 batch 单调上升：**pp64 40.7 / pp128 53.3 / pp256 66.5 
 
 ### 3.2 之后所有 A/B 的硬性要求
 
-1. 必须带**零对照**（同配置两次）测出当轮噪声底；
+1. 必须带**零对照**（同配置跑两次）测出当轮噪声底；
 2. 必须 **ABBA 交替**，避免"第二个总是更快"的位置偏差；
 3. 报告的差值必须**大于当轮噪声底**，否则记为"无效果"；
-4. 单次运行之间的 ±5% 只能用于"方向性判断"，不能当收益。
+4. 单次运行之间 ±5% 的差异只能用于方向性判断，不能当收益。
 
 ## 4. 工具现状（都已入库，env 门控，关闭时零开销）
 
 | 工具 | 用途 |
 | --- | --- |
-| `STRATA_VK_TIME=1` | 每 token 一行，含 record/submit/wait/dispatch/barrier/fusion/end/build/dep/mmv/mmvid/cleanup |
+| `STRATA_VK_TIME=1` | 每 token 一行：record/submit/wait/dispatch/barrier/fusion/end/build/dep/mmv/mmvid/cleanup |
 | `STRATA_VK_SUBMITS=N` | 限制一张图的提交数（证明提交开销可忽略） |
 | `GGML_VK_SERIALIZE_SUBMISSIONS=1` | 每次提交后等待，暴露 GPU 真实耗时 |
 | `port/tools/weight-report.py` | 按 header 偏移算每 token 权重字节数（不依赖类型表） |
-| `port/probe/mm-probe` | 单形状、单 backend 的类型带宽（warm，400 次迭代） |
+| `port/tools/ab_pp.py` | ABBA + 零对照的 A/B（`--control` 测噪声底） |
+| `port/probe/mm-probe` | 单形状、单 backend 的类型带宽（warm，400 次迭代），不重载 pack |
+
+## 5. Q2_0 的 prefill 为什么只有 Gyro-S 的一半：专家走了 matvec 尾循环
+
+`STRATA_VK_PIPE_LOG=1` 抓一次 prefill 的管线直方图（Q2_0 @pp256，13 136 次 dispatch）：
+
+| 管线 | 次数 | 是什么 |
+| --- | --- | --- |
+| `matmul_coop_f16_f16acc_aligned_*` | 777 | 密集/注意力权重（**bf16** 的）走 coopmat ✓ |
+| `matmul_bf16_*` | 1 428 | 同上 |
+| **`mul_mat_vec_id_q2_0_f32`** | **153** | **Q2_0 的专家（MUL_MAT_ID）走 matvec** ✗ |
+| **`mul_mat_vec_q2_0_f32_f32`** | **42** | 同上（非 id 路径） |
+| `matmul_id_coop_f16_f16acc_aligned_*` | 423 | 也是 bf16 的专家路径 |
+
+同一份模型里 **bf16 张量拿到 `matmul_id_coop`（分组 coopmat），而 Q2_0 专家拿到 `mul_mat_vec_id_q2_0`（逐专家 matvec 尾循环）**。
+
+对照 Gyro-S @pp64（83.5 tok/s，Q2_0 同 batch 为 40.7）：
+
+| 管线 | 次数 |
+| --- | --- |
+| `matmul_coop_f16_f16acc_aligned_*` | 1 182 |
+| **`matmul_id_coop_f16_f16acc_aligned_*`** | **423** ← trellis 专家走 coopmat ✓ |
+| `mul_mat_vec_q5_k/q6_k/q8_0` | 684（密集层的小张量） |
+
+**结论**：trellis 的专家在本移植里已经有分组 coopmat 路径（`matmul_id_coop_f16_f16acc` 支持 TQK6/TQK7），
+而 Q2_0 没有，于是回退到"每个专家一组 matvec"。这就是 40.7 vs 83.5 的直接原因。
+
+**下一轮目标**：把 Q2_0 接进 `mul_mm`/`mul_mm_id` 的 item loader（照 trellis 的接法），让 10/512 的稀疏专家也走
+分组 coopmat。判据：`--bench-pp 64/256/512` 三档各自 ≥3 次中位数（含零对照），且 32 token 与 oracle 不变。
