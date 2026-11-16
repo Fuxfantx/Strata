@@ -25,9 +25,11 @@ namespace strata {
 inline constexpr const char * kEngineVersion = "0.2.13-arm64-vulkan";
 
 // The context the app asks for by default, and the prompt chunk.  A 2048-token batch makes the Vulkan backend
-// allocate a 3.2 GiB compute buffer on Adreno, so the chunk is deliberately small.
+// allocate a 3.2 GiB compute buffer on Adreno, so the chunk stays at half of that: 1024 measured 25% faster prefill than
+// 512 (pp512 96.6 against 77.4 tok/s, pp256 83.8 against 66.5, pp64 45.8 against 41.7, tokens identical), and 2048 would
+// quadruple the buffer for a chunk no prompt on this machine reaches.
 inline constexpr int kDefaultCtx   = 32768;
-inline constexpr int kDefaultBatch = 512;
+inline constexpr int kDefaultBatch = 1024;
 
 using Clock = std::chrono::steady_clock;
 
