@@ -1144,6 +1144,12 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
             ggml_set_name(it.second.tensor, remapped_name.c_str());
             LLAMA_LOG_DEBUG("%s: tensor %s remapped to %s\n", __func__, it.first.c_str(), ggml_get_name(it.second.tensor));
         }
+        if (params->only_tensors != nullptr && params->only_tensors[0] != '\0') {
+            static const std::regex only_re(params->only_tensors);
+            if (!std::regex_search(it.first, only_re)) {
+                continue;
+            }
+        }
         tensors.push_back(&it.second);
     }
     if (!prune_list.empty()) {
@@ -1493,7 +1499,8 @@ llama_model_quantize_params llama_model_quantize_default_params() {
         /*.kv_overrides                =*/ nullptr,
         /*.tensor_type                 =*/ nullptr,
         /*.prune_layers                =*/ nullptr,
-        /*.max_buf_size                =*/ LLAMA_QUANT_MAX_BUF_SIZE
+        /*.max_buf_size                =*/ LLAMA_QUANT_MAX_BUF_SIZE,
+        /*.only_tensors                =*/ nullptr
     };
 
     return result;
