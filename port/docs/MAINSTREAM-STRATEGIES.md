@@ -67,3 +67,44 @@ Gyro-S 每 token 读 ≈4.1 GiB，其中：
 **下一阶段的目标定为 M1 的本移植版本：稠密层配套重打包（trellis）+ CLI/app 工作流整合。**
 它是唯一一条既能把每 token 字节数砍到 1/2.6、又与本机最快内核（87 GB/s）对齐的路线，代价是稠密层的画质，
 因此必须做成**可选伴随包**并提供质量代理与回退。
+
+## 5. 实施进展：伴随包已经能产出（1381 MiB）
+
+### 5.1 命令
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File port/tools/make-compat.ps1 -Pack Gyro-S-TQ1_0.gguf
+```
+
+内部就是 `llama-quantize` 的三个开关组合：
+
+```text
+--only-tensors '^(?!.*(_exps|per_layer_token_embd)).*$'   # 只写稠密层
+--tensor-type ".*=TQK6"                                    # 重打成 trellis
+--allow-requantize  in.gguf out.gguf Q8_0                        # 源已是量化格式；Q8_0 是窄张量的兜底
+```
+
+### 5.2 实测（Gyro-S，本机）
+
+| 项 | 数值 |
+| --- | --- |
+| 选中张量 | 1224 |
+| 稠密源大小 | 3701 MiB |
+| **伴随包** | **1370 MiB（文件 1381 MiB）** |
+| 压缩比 | **2.7x** ✓ 与"1/2.6"的推算一致 |
+| 走兜底的窄张量 | 98（`ncols` 不能整除 128 ⇒ Q8_0） |
+| 耗时 | 约 **17 分钟**（trellis 编码很贵，一次性成本） |
+
+### 5.3 过程中补上的两个真实缺口（都在 overlay 里）
+
+1. **量化器缺少本移植类型的兜底**：`tensor_type_fallback` 对 TQK6/TQK7/TQ2_T/PTQ1_0 没有条目，
+   320 宽的稠密张量直接抛 `no tensor type fallback is defined` ⇒ 已加条目，回退到 Q8_0（与 Q6_K 的做法一致）。
+2. **行数据校验器不认识 TQK6/TQK7**：`ggml_validate_row_data` 是"逐个类型列 case、default 拒绝"，
+   PTQ1_0/TQ2_T 早前加过，TQK6/TQK7 没有 ⇒ 量化后校验报 `invalid type 145`，整次量化失败 ⇒ 已补上两个 case。
+
+### 5.4 还差什么
+
+- **引擎侧 `--compat`**：让 `llama_model_loader` 用伴随包覆盖同名稠密张量的 (file, offset, **type**)，
+  这样模型的张量按 TQK6 的形状建立、数据从伴随包读；缺失即回退原包。
+- **质量代理**：同段文本的对数似然/困惑度对比。
+- **CLI/app 入口**：`strata-vk --compact` 与 `setup.py` 的 gyro 分支提示。

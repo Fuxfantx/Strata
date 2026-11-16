@@ -485,6 +485,11 @@ static ggml_type tensor_type_fallback(quantize_state_impl & qs, const ggml_tenso
             case GGML_TYPE_Q4_K:    return_type = GGML_TYPE_Q5_0;   break;
             case GGML_TYPE_Q5_K:    return_type = GGML_TYPE_Q5_1;   break;
             case GGML_TYPE_Q6_K:    return_type = GGML_TYPE_Q8_0;   break;
+            // the port's trellis and ternary types: block sizes of 128 and up, so a narrow tensor needs Q8_0 (block 32)
+            case GGML_TYPE_TQK6:
+            case GGML_TYPE_TQK7:
+            case GGML_TYPE_TQ2_T:
+            case GGML_TYPE_PTQ1_0:  return_type = GGML_TYPE_Q8_0;   break;
             default:
                 if (qk_k <= 32) {
                     // the target is already a 32-block type, so there is no smaller block to demote to
