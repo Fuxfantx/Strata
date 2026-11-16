@@ -48,6 +48,33 @@
    → host 侧与屏障的三个候选**都还没被用上**，这不是"已优化过"的方向。
 3. 每 token 权重字节数（`port/tools/weight-report.py`，按 header 偏移精确取）：Q2_0 4.37 GiB、Gyro-S ≈4.2 GiB（已剔除 PLE 表）。
 
+### 0.6 **颠覆性结论：decode 是 CPU 录制受限，不是 GPU 受限**
+
+新增环境开关 `STRATA_VK_TIME=1`（`ggml-vulkan.cpp`，env 门控、零开销关闭）：在 `ggml_backend_vk_graph_compute` 记
+"录制+提交"、在 `ggml_vk_submit` 记提交、在 `ggml_backend_vk_synchronize` 记等待，每 token 打一行。
+
+| pack | record（CPU 录制） | submit | wait（等在 GPU 上） | 端到端 |
+| --- | --- | --- | --- | --- |
+| Q2_0 | **71.1 ms** | 0.90 ms（27 次） | **0.001 ms** | 15.5 tok/s = 64.5 ms/token |
+| Gyro-S | **100.7 ms** | 0.93 ms（29 次） | **0.001 ms** | 11.0 tok/s = 91 ms/token |
+
+再用 `GGML_VK_SERIALIZE_SUBMISSIONS=1`（每次提交后强制等待，破坏重叠）测出 **GPU 真实耗时**：
+
+| pack | async | serialized | 差 = GPU 时间 |
+| --- | --- | --- | --- |
+| Q2_0 | 15.5 tok/s（64.5 ms） | 9.5 tok/s（105 ms） | **≈40 ms** |
+| Gyro-S | 11.0 tok/s（91 ms） | 7.7 tok/s（130 ms） | **≈39 ms** |
+
+**所以每个 token 的成本结构是：CPU 录制 65-100 ms、GPU 约 40 ms、等待 ~0。**
+即 **GPU 有一半时间是空闲的**，瓶颈在 host 侧的**指令录制**（约 2 700 次 dispatch → **每次 ~26 µs**，远高于上游常见的 1-2 µs）。
+
+这条结论**推翻了"host ~30 ms"的旧估计**，也把优化顺序整个改掉：
+原先排第一的 "Q2_0 matvec 内核效率" 仍然值得做（GPU 侧 40 ms 里大部分是它），但**第一优先变成"每 dispatch 的录制成本"**——
+只要把它从 26 µs 降到 10 µs，decode 就能从 64.5/91 ms 掉到 ~40/55 ms，即 **+50-60%**。
+
+下一步要定位那 26 µs 花在哪：描述符集写入、`vkCmdPipelineBarrier`（第四阶段实测约 **5 µs/次**）、push constant、
+pipeline 绑定，还是 `vkCmdUpdateBuffer`。做法与本次相同：在 `ggml_vk_dispatch_pipeline` 里加同类累加器。
+
 ---
 
 ## 1. 让 Q2_0 的 matvec 吃到带宽（最高优先级）
@@ -180,18 +207,22 @@ trellis（TQK6/TQK7）已经是本机最快的 matvec，但仍只有墙的 62%�
 
 ## 8. 风险 / 收益排序（建议动手顺序）
 
+> **已被 §0.6 修正**：第一优先从"Q2_0 matvec 内核"改为"**每 dispatch 的 CPU 录制成本**"，因为实测每个 token 的
+> 录制时间是 GPU 时间的 1.6-2.5 倍，GPU 有一半时间空闲。
+
 | 序 | 项目 | 预期收益 | 风险 | 工作量 |
 | --- | --- | --- | --- | --- |
-| 1 | **Q2_0 matvec 重排 + 向量化（1.1/1.2）** | decode +15-30%（Q2_0） | 中 | 1-2 轮 |
-| 2 | **`--profile` 分阶段 + 图缓存（3.1.1/3.1.6）** | decode +8-15%（两个 pack） | 低 | 1 轮 |
-| 3 | **Q2_0 的 coopmat f16 prefill（4.2）** | prefill +100-300%（Q2_0） | 中 | 2-3 轮 |
-| 4 | **描述符池化 / push descriptor（3.1.2）** | decode +5-10% | 中 | 1-2 轮 |
-| 5 | **MTP 接受率实测 + 自适应 k（5.1/5.3）** | decode +10-40% | 中-高 | 2 轮 |
-| 6 | **trellis 预取/查表复用（2.1/2.2）** | decode +5-15%（Gyro-S） | 中 | 1-2 轮 |
-| 7 | **Q2_0 int8-dot（1.3）** | decode +10-20%、prefill +100% | 中-高 | 2-3 轮 |
-| 8 | **双队列重叠尾巴（3.2.1）** | +3-8% | 中 | 1 轮 |
-| 9 | **output.weight 降比特（1.6）** | +5-8% | 低 | 半天 |
-| 10 | **两阶段 logits（1.7）/ 专家热排布（2.6）** | +8-15% | 高 | 研究向 |
+| **0** | **定位并削减每 dispatch 的录制成本**（描述符 / 屏障 / push constant / pipeline 绑定；先加同类累加器定位） | **decode +30-60%（两个 pack）** | 中 | 1-2 轮定位 + 1-2 轮改 |
+| 1 | Q2_0 matvec 重排 + 向量化（1.1/1.2）—— GPU 侧 40 ms 里的主体 | decode +10-20%（Q2_0） | 中 | 1-2 轮 |
+| 2 | 图缓存 / 减少每 token 的重建（3.1.1） | decode +5-15% | 低 | 1 轮 |
+| 3 | Q2_0 的 coopmat f16 prefill（4.2）+ 小 batch 路径（4.4） | prefill +30-150%（Q2_0） | 中 | 2-3 轮 |
+| 4 | 描述符池化 / `VK_KHR_push_descriptor`（3.1.2，**是第 0 项的一种实现**） | 含在第 0 项里 | 中 | — |
+| 5 | MTP 接受率实测 + 自适应 k（5.1/5.3） | decode +10-40% | 中-高 | 2 轮 |
+| 6 | trellis 预取/查表复用（2.1/2.2） | decode +5-15%（Gyro-S） | 中 | 1-2 轮 |
+| 7 | Q2_0 int8-dot（1.3） | decode +10-20%、prefill +100% | 中-高 | 2-3 轮 |
+| 8 | 双队列重叠尾巴（3.2.1）—— GPU 有空闲时**无效**，先做第 0 项 | 0（当前） | 中 | — |
+| 9 | output.weight 降比特（1.6） | +5-8% | 低 | 半天 |
+| 10 | 两阶段 logits（1.7）/ 专家热排布（2.6） | +8-15% | 高 | 研究向 |
 
 ---
 

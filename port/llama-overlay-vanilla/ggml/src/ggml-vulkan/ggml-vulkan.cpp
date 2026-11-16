@@ -901,7 +901,38 @@ static vk_command_buffer* ggml_vk_create_cmd_buffer(vk_device& device, vk_comman
     return &p.cmd_buffers[p.cmd_buffers.size()-1];
 }
 
+// STRATA_VK_TIME=1: where a graph's wall time goes.  `submit` is the CPU cost of the vkQueueSubmit calls, so
+// graph - submit is command recording plus waiting for the GPU; with one submit per graph the wait dominates and the
+// number reads as "the GPU had this long".
+namespace {
+struct vk_time_stats {
+    double graph_ms  = 0.0;
+    double submit_ms = 0.0;
+    double wait_ms   = 0.0;
+    int    submits   = 0;
+    bool   on        = false;
+    bool   init      = false;
+};
+vk_time_stats g_vk_time;
+
+double vk_now_ms() {
+    using clock = std::chrono::steady_clock;
+    return std::chrono::duration<double, std::milli>(clock::now().time_since_epoch()).count();
+}
+} // namespace
+
 void ggml_vk_submit(vk_context& ctx, vk::Fence fence) {
+    const bool timed = g_vk_time.on;
+    const double t0 = timed ? vk_now_ms() : 0.0;
+    struct submit_scope {
+        bool timed; double t0;
+        ~submit_scope() {
+            if (timed) {
+                g_vk_time.submit_ms += vk_now_ms() - t0;
+                g_vk_time.submits   += 1;
+            }
+        }
+    } submit_scope_{ timed, t0 };
     if (ctx->seqs.empty()) {
         if (fence) {
             ctx->p->q->handle->submit({}, fence);
@@ -14705,7 +14736,14 @@ static void ggml_backend_vk_synchronize(ggml_backend_t backend) {
     VK_LOG_DEBUG("ggml_backend_vk_synchronize()");
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
 
+    const double wait_t0 = g_vk_time.on ? vk_now_ms() : 0.0;
     ggml_vk_synchronize(ctx);
+    if (g_vk_time.on) {
+        g_vk_time.wait_ms += vk_now_ms() - wait_t0;
+        fprintf(stderr, "[time] record=%.3fms submit=%.3fms wait=%.3fms submits=%d\n",
+                g_vk_time.graph_ms - g_vk_time.submit_ms, g_vk_time.submit_ms, g_vk_time.wait_ms,
+                g_vk_time.submits);
+    }
 
     ggml_vk_graph_cleanup(ctx);
 }
@@ -15540,6 +15578,22 @@ static void ggml_vk_dump_tensor(FILE * f, ggml_tensor * node) {
 static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     VK_LOG_DEBUG("ggml_backend_vk_graph_compute(" << cgraph->n_nodes << " nodes)");
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
+
+    if (!g_vk_time.init) {
+        g_vk_time.init = true;
+        g_vk_time.on   = getenv("STRATA_VK_TIME") != nullptr;
+    }
+    const double graph_t0 = g_vk_time.on ? vk_now_ms() : 0.0;
+    if (g_vk_time.on) {
+        g_vk_time.graph_ms  = 0.0;
+        g_vk_time.submit_ms = 0.0;
+        g_vk_time.wait_ms   = 0.0;
+        g_vk_time.submits   = 0;
+    }
+    struct graph_scope {
+        double t0; bool on;
+        ~graph_scope() { if (on) { g_vk_time.graph_ms += vk_now_ms() - t0; } }
+    } graph_scope_{ graph_t0, g_vk_time.on };
 
     const char * dump_node = getenv("GGML_VK_DUMP_NODE");
 

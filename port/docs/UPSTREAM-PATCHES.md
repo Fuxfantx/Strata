@@ -172,3 +172,10 @@ and `STRATA_NO_FUSED_TOPK_MASK=1` isolate the two indexer fusions the way `STRAT
 into one pipe and reading that single stream removes the deadlock; keep the diagnostics by copying the captured text into
 `stderr_str`.
 
+17. **STRATA_VK_TIME=1: where a decode step's wall time goes** (ggml/src/ggml-vulkan/ggml-vulkan.cpp).  Three
+   accumulators - the graph's recording time in ggml_backend_vk_graph_compute, the CPU time inside ggml_vk_submit,
+   and the fence wait in ggml_backend_vk_synchronize - and one line per token (
+ecord, submit, wait, submit
+   count).  Off by default with no measurable overhead.  This is what established that a decode step is CPU
+   recording-bound: Gyro-S records for 100.7 ms and waits 0.001 ms for a 91 ms token, and with
+   GGML_VK_SERIALIZE_SUBMISSIONS=1 the exposed GPU time is only about 39 ms.
