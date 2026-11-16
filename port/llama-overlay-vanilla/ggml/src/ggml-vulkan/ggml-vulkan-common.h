@@ -287,6 +287,9 @@ bool ggml_vk_concat_supported(const ggml_tensor * src0, const ggml_tensor * src1
 
 // STRATA_VK_TIME=1 also splits the recording cost: how much of it is the dispatch call itself, how much is the
 // barriers, and how much is everything else the node loop does (pipeline lookup, tensor views, push constant setup).
+inline double g_vk_build_ms    = 0.0;
+inline double g_vk_dep_ms      = 0.0;
+inline int    g_vk_build_n     = 0;
 inline double g_vk_cleanup_ms  = 0.0;
 inline int    g_vk_cleanup_n   = 0;
 inline double g_vk_end_ms      = 0.0;

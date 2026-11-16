@@ -13414,6 +13414,16 @@ void ggml_vk_preallocate_buffers(ggml_backend_vk_context * ctx, vk_context subct
 }
 
 bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, int node_idx, ggml_tensor *node_begin, int node_idx_begin, bool last_node, bool almost_ready, bool submit){
+    const double build_t0 = g_vk_build_ms >= 0.0 ? ggml_vk_now_ms() : 0.0;
+    struct build_scope {
+        double t0;
+        ~build_scope() {
+            if (g_vk_build_ms >= 0.0) {
+                g_vk_build_ms += ggml_vk_now_ms() - t0;
+                g_vk_build_n  += 1;
+            }
+        }
+    } build_scope_{ build_t0 };
     ggml_tensor * node = cgraph->nodes[node_idx];
     if (ggml_is_empty(node) || ggml_op_is_empty(node->op) || !node->buffer) {
         return false;
@@ -13449,6 +13459,15 @@ bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, in
     vk_context compute_ctx = ggml_vk_get_compute_ctx(ctx);
 
     {
+        const double dep_t0 = g_vk_dep_ms >= 0.0 ? ggml_vk_now_ms() : 0.0;
+        struct dep_scope {
+            double t0;
+            ~dep_scope() {
+                if (g_vk_dep_ms >= 0.0) {
+                    g_vk_dep_ms += ggml_vk_now_ms() - t0;
+                }
+            }
+        } dep_scope_{ dep_t0 };
         // This logic detects dependencies between modes in the graph and calls ggml_vk_sync_buffers
         // to synchronize them. This handles most "normal" synchronization when computing the graph, and when
         // there is no auxiliary memory use, it shouldn't be necessary to call ggml_vk_sync_buffers
@@ -14771,12 +14790,13 @@ static void ggml_backend_vk_synchronize(ggml_backend_t backend) {
     if (g_vk_time.on) {
         g_vk_time.wait_ms += vk_now_ms() - wait_t0;
         fprintf(stderr, "[time] record=%.3fms submit=%.3fms wait=%.3fms submits=%d dispatch=%.3fms (%d) "
-                "barrier=%.3fms (%d) fusion=%.3fms (%d) end=%.3fms (%d) other=%.3fms cleanup(prev)=%.3fms\n",
+                "barrier=%.3fms (%d) fusion=%.3fms (%d) end=%.3fms (%d) build=%.3fms (%d) dep=%.3fms "
+                "other=%.3fms cleanup(prev)=%.3fms\n",
                 g_vk_time.graph_ms - g_vk_time.submit_ms, g_vk_time.submit_ms, g_vk_time.wait_ms,
                 g_vk_time.submits, g_vk_dispatch_ms, g_vk_dispatch_n, g_vk_barrier_ms, g_vk_barrier_n,
-                g_vk_fuse_ms, g_vk_fuse_n, g_vk_end_ms, g_vk_end_n,
+                g_vk_fuse_ms, g_vk_fuse_n, g_vk_end_ms, g_vk_end_n, g_vk_build_ms, g_vk_build_n, g_vk_dep_ms,
                 g_vk_time.graph_ms - g_vk_time.submit_ms - g_vk_dispatch_ms - g_vk_barrier_ms - g_vk_fuse_ms
-                    - g_vk_end_ms, g_vk_cleanup_ms);
+                    - g_vk_end_ms - g_vk_build_ms, g_vk_cleanup_ms);
     }
 
     ggml_vk_graph_cleanup(ctx);
@@ -15621,6 +15641,8 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         g_vk_fuse_ms     = g_vk_time.on ? 0.0 : -1.0;
         g_vk_end_ms      = g_vk_time.on ? 0.0 : -1.0;
         g_vk_cleanup_ms  = g_vk_time.on ? 0.0 : -1.0;
+        g_vk_build_ms    = g_vk_time.on ? 0.0 : -1.0;
+        g_vk_dep_ms      = g_vk_time.on ? 0.0 : -1.0;
     }
     const double graph_t0 = g_vk_time.on ? vk_now_ms() : 0.0;
     if (g_vk_time.on) {
@@ -15636,6 +15658,9 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         g_vk_fuse_n         = 0;
         g_vk_end_ms         = 0.0;
         g_vk_end_n          = 0;
+        g_vk_build_ms       = 0.0;
+        g_vk_dep_ms         = 0.0;
+        g_vk_build_n        = 0;
         g_vk_cleanup_ms     = 0.0;
         g_vk_cleanup_n      = 0;
     }
