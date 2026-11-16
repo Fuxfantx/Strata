@@ -66,30 +66,48 @@ Q2_0 的 prefill 随 batch 单调上升：**pp64 40.7 / pp128 53.3 / pp256 66.5 
 | `port/tools/ab_pp.py` | ABBA + 零对照的 A/B（`--control` 测噪声底） |
 | `port/probe/mm-probe` | 单形状、单 backend 的类型带宽（warm，400 次迭代），不重载 pack |
 
-## 5. Q2_0 的 prefill 为什么只有 Gyro-S 的一半：专家走了 matvec 尾循环
+## 5. Q2_0 的 prefill：先更正一个错误结论，再定位真正的开销
 
-`STRATA_VK_PIPE_LOG=1` 抓一次 prefill 的管线直方图（Q2_0 @pp256，13 136 次 dispatch）：
+### 5.1 更正
 
-| 管线 | 次数 | 是什么 |
+上一轮我根据管线直方图断言"Q2_0 的专家从未进入 coopmat 路径"。**这是错的。**
+
+直方图只统计次数、不带类型归属，而 `--bench-pp N` 的一次运行里既有 prefill 又有随后的 decode 步，两者混在一起。
+把 `[node]` 与 `[pipe]` 逐条对齐（`port/tools/zip-node-pipe.py`）后，归属非常清楚：
+
+| 管线 | 次数 | 归属的节点 | 网格 |
+| --- | --- | --- | --- |
+| `matmul_id_coop_f16_f16acc_aligned_0` | 423 | **`ffn_moe_gate/up/down-<层>`** | 20x160x1 / 80x160x1 |
+| `mul_mat_vec_id_q2_0_f32` | 153 | **同一批 `ffn_moe_*` 节点** | 320x10x1 |
+
+**同一批专家节点**：prefill 的那一遍走 `matmul_id_coop`（✓ 已经 tile 化），随后 decode 的每一遍走 `mul_mat_vec_id_q2_0`
+（n_tokens ≤ 8，`ggml_vk_use_mul_mat_vec_id` 的阈值）。Gyro-S 在 pp64 的 `matmul_id_coop` 也是 **423 次、同样网格**
+（20x160x1 / 80x160x1）——两个 pack 的专家路径**完全一致**。
+
+⇒ 专家路径不是 41 vs 82 tok/s 的原因，上一轮的"缺一条 coopmat 路径"结论作废。
+
+### 5.2 真正的差异：bf16 的密集权重与转换拷贝
+
+同一份 pp256 的 Q2_0 直方图里，占绝对多数的是**转换与 bf16 矩阵乘**：
+
+| 管线 | 次数 | 说明 |
 | --- | --- | --- |
-| `matmul_coop_f16_f16acc_aligned_*` | 777 | 密集/注意力权重（**bf16** 的）走 coopmat ✓ |
-| `matmul_bf16_*` | 1 428 | 同上 |
-| **`mul_mat_vec_id_q2_0_f32`** | **153** | **Q2_0 的专家（MUL_MAT_ID）走 matvec** ✗ |
-| **`mul_mat_vec_q2_0_f32_f32`** | **42** | 同上（非 id 路径） |
-| `matmul_id_coop_f16_f16acc_aligned_*` | 423 | 也是 bf16 的专家路径 |
+| `contig_cpy_f32_bf16` | 1 320 | f32 → bf16 的逐元素转换拷贝 |
+| `contig_cpy_f32_f16` | 912 | f32 → f16 的转换拷贝 |
+| `matmul_bf16_aligned_1` | 668 | **bf16 权重**的矩阵乘 |
+| `matmul_bf16_0` | 426 | 同上 |
+| `matmul_bf16_aligned_0` | 334 | 同上 |
+| `matmul_coop_f16_f16acc_aligned_*` | 777 | f16 coopmat |
+| `scale_f32` / `rms_norm_mul` / `silu` / `gated_mul` / `swiglu` / `add` | 3 300+ | 逐元素尾巴 |
 
-同一份模型里 **bf16 张量拿到 `matmul_id_coop`（分组 coopmat），而 Q2_0 专家拿到 `mul_mat_vec_id_q2_0`（逐专家 matvec 尾循环）**。
+Gyro-S 的同一位置是 `matmul_q5_k_q8_1` / `matmul_q6_k_q8_1` / `matmul_q8_0_q8_1`（int8-dot），而不是 bf16。
+**Q2_0 这个 pack 的密集/注意力权重是 BF16（1.37 GiB），于是走了 bf16 矩阵乘，并伴随每 token 上千次 f32↔bf16/f16 的转换拷贝。**
 
-对照 Gyro-S @pp64（83.5 tok/s，Q2_0 同 batch 为 40.7）：
+下一轮的候选（按可测性排序）：
+1. **把 BF16 权重在加载期转成 F16**（体积不变、本机 f16 coopmat 有硬件路径），消除 bf16 matmul；
+2. **减少 `contig_cpy_f32_*` 的转换拷贝**：f16 激活一路保持 f16，而不是 f32→f16→f32；
+3. 判据仍是 `--bench-pp 64/256/512` 各 ≥3 次中位数 + 零对照，以及 32 token 与 oracle 不变。
 
-| 管线 | 次数 |
-| --- | --- |
-| `matmul_coop_f16_f16acc_aligned_*` | 1 182 |
-| **`matmul_id_coop_f16_f16acc_aligned_*`** | **423** ← trellis 专家走 coopmat ✓ |
-| `mul_mat_vec_q5_k/q6_k/q8_0` | 684（密集层的小张量） |
+### 5.3 教训（写进纪律）
 
-**结论**：trellis 的专家在本移植里已经有分组 coopmat 路径（`matmul_id_coop_f16_f16acc` 支持 TQK6/TQK7），
-而 Q2_0 没有，于是回退到"每个专家一组 matvec"。这就是 40.7 vs 83.5 的直接原因。
-
-**下一轮目标**：把 Q2_0 接进 `mul_mm`/`mul_mm_id` 的 item loader（照 trellis 的接法），让 10/512 的稀疏专家也走
-分组 coopmat。判据：`--bench-pp 64/256/512` 三档各自 ≥3 次中位数（含零对照），且 32 token 与 oracle 不变。
+**直方图必须按 prefill / decode 分开统计，并按节点归属**——`zip-node-pipe.py` 是工具；只看管线名的次数会得出反向结论。
