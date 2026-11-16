@@ -128,3 +128,50 @@ Gyro-S 的同一位置是 `matmul_q5_k_q8_1` / `matmul_q6_k_q8_1` / `matmul_q8_0
 教训：**能"跳过"的测量只适用于产物不影响下游时序的地方**（例如 fwht 那次是纯数值路径）；转换、归一化这类
 会改变下游数值分布的算子，不能用跳过法定价。要给它定价只能：给 `ggml_vk_cpy_to_contiguous` 加计时分桶（host 侧），
 或用 RenderDoc 抓单次 dispatch 的 GPU 时间。
+
+## 6. Qualcomm 在 decode 上从不走 matvec：`should_use_mmvq` 直接 `return false`
+
+### 6.1 转换的真实归属
+
+把"转换"和它**后面紧跟的那条管线**配对（decode，3 token），归属就确定了：
+
+| 转换 | 次数 | 紧跟的消费者 |
+| --- | --- | --- |
+| `contig_cpy_f32_bf16` | 440 | `matmul_bf16_aligned_0` 298 + `matmul_bf16_0` 142 |
+| `contig_cpy_f32_f16` | 304 | `matmul_coop_f16_f16acc_aligned_0` 210 + `matmul_id_coop_..._0` 94 |
+
+也就是说：**decode（n=1）里仍在用 GEMM（`matmul_*`）**，每个 GEMM 前面还要多一次激活转换。
+
+根因在 `ggml_vk_should_use_mmvq` 的结尾：
+
+```cpp
+case VK_VENDOR_ID_QUALCOMM:
+    return false;      // → n == 1 的 matmul 全部走 GEMM 路径
+default:
+    return true;
+```
+
+这是上游按别的 Adreno 得出的经验值，本机从未验证过。
+
+### 6.2 用现成开关量它：`GGML_VK_FORCE_MMVQ=1`（上游已有，`mmvq_mode = 1`）
+
+ABBA 两对（`--tokens 9707 --n 8`，steady 值）：
+
+| 顺序 | default | FORCE_MMVQ |
+| --- | --- | --- |
+| AB | 15.3 | 15.5 |
+| BA | 15.2 | 15.4 |
+
+**中位 15.25 → 15.45，+1.3%，两对都赢**（ABBA 已排除位置偏差；高于本轮 ~0.42% 的零对照噪声底）。
+但只有两对，**不足以改默认值**。
+
+### 6.3 一个反直觉的细节
+
+开了 `FORCE_MMVQ` 之后，**那 440 + 304 次转换和对应的 `matmul_*` 一次都没少**（次数完全相同）。
+说明这些节点根本不受 `mmvq_mode` 影响——它们走的是另一条判据（`ggml_vk_use_mul_mat_vec_id` 的 8-token 阈值，或
+attention 侧的 matmul）。+1.3% 来自**另一批**节点切换到了 matvec。
+
+### 6.4 下一轮
+
+1. **5 对 ABBA** 复测 `FORCE_MMVQ`；若仍 ≥1%，把 `VK_VENDOR_ID_QUALCOMM` 的 `return false` 改成按 `n == 1 && k >= 2048` 走 matvec，并记 provenance；
+2. 用 `zip-node-pipe.py` 找出**FORCE_MMVQ 下仍在转换的那 744 个节点**是谁（它们不受 mmvq_mode 影响），再决定是改阀值还是改管线选择。
