@@ -36,11 +36,20 @@ Q2_0 的 prefill 随 batch 单调上升：**pp64 40.7 / pp128 53.3 / pp256 66.5 
 - `GGML_VK_DISABLE_MMQ=1` @pp64 → **43.1 tok/s（+5.9%）**
 - `GGML_VK_DISABLE_MMVQ=1` @pp64 → **42.3 tok/s（+3.9%）**
 
-两个方向都比默认好，说明 **pp64 这个点上默认的 mmq/mmvq 组合不是最优**。下一轮：
-1. 各跑 3 次取中位数，确认幅度；
-2. 若确认，在 `ggml_vk_should_use_mmq` 里加"小 batch 走 matvec"的分支（本机 vendor 为 Qualcomm），
-   门槛用 pp64/pp128 两档实测确定；
-3. 门禁：32 token 相等 + `test-backend-ops -o MUL_MAT` 0 失败 + 三次中位数 A/B。
+**复测（每档 3 次）**：
+
+| 配置 | pp64 | pp256 | pp512 |
+| --- | --- | --- | --- |
+| 默认 | 40.7 / 41.7 / 42.9（中位 **41.7**） | 66.5 | 77.4 |
+| `DISABLE_MMQ` | 42.2 / 43.1 / 43.3（中位 **43.1**） | 67.3 | 77.7 |
+
+三次运行里 **noMMQ 全部高于默认**（符号检验 p≈5%），pp64 上中位 **+3.4%**；大 batch 无回退（pp256 +1.1%、pp512 +0.4%，均在噪声内）。
+⇒ 本机（Qualcomm）**小 batch 走 matvec 更好**，大 batch 走 mmq。
+
+下一轮：
+1. 在 `ggml_vk_should_use_mmq` 里加 Qualcomm 的 `n ≤ 64 → 走 matvec` 分支（阈值用 pp64/pp128 两档实测确定）；
+2. 门禁：32 token 相等 + `test-backend-ops -o MUL_MAT` 0 失败 + pp64/pp512 各 3 次中位数；
+3. 若 pp512 出现回退则把阈值收紧到 `n ≤ 32`。
 
 ## 4. 工具现状（都已入库，env 门控，关闭时零开销）
 
