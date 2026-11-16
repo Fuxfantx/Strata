@@ -172,10 +172,16 @@ and `STRATA_NO_FUSED_TOPK_MASK=1` isolate the two indexer fusions the way `STRAT
 into one pipe and reading that single stream removes the deadlock; keep the diagnostics by copying the captured text into
 `stderr_str`.
 
-17. **STRATA_VK_TIME=1: where a decode step's wall time goes** (ggml/src/ggml-vulkan/ggml-vulkan.cpp).  Three
-   accumulators - the graph's recording time in ggml_backend_vk_graph_compute, the CPU time inside ggml_vk_submit,
-   and the fence wait in ggml_backend_vk_synchronize - and one line per token (
-ecord, submit, wait, submit
-   count).  Off by default with no measurable overhead.  This is what established that a decode step is CPU
-   recording-bound: Gyro-S records for 100.7 ms and waits 0.001 ms for a 91 ms token, and with
-   GGML_VK_SERIALIZE_SUBMISSIONS=1 the exposed GPU time is only about 39 ms.
+17. **`STRATA_VK_TIME=1`: where a decode step's wall time goes** (`ggml/src/ggml-vulkan/ggml-vulkan.cpp`,
+   `ggml/src/ggml-vulkan/ggml-vulkan-common.h`).  A stopwatch over a graph's recording, six buckets inside it (the
+   dispatch helper, `ggml_vk_sync_buffers`, the fusion chain, `ggml_vk_ctx_end`, `ggml_vk_submit` and the command pool
+   cleanup), the fence wait in `ggml_backend_vk_synchronize`, and one line per token.  Off by default with no overhead.
+
+   It first looked as if a decode step were CPU recording-bound (Gyro-S recording 100.7 ms and waiting 0.001 ms for a
+   91 ms token), and the buckets show that reading was wrong: the dispatch helper costs 0.49 us per call, a barrier
+   0.04 us, the whole fusion chain 0.16 us per node, and cleanup 0.12 ms, which is about 3 ms of host work in a 72 ms
+   window.  `STRATA_VK_SUBMITS=N`, which caps how many command buffers a graph is split into, confirms it: 1, 4 and 26
+   submissions all give the same throughput.  With `GGML_VK_SERIALIZE_SUBMISSIONS=1` a Q2_0 token falls from 15.5 to
+   9.5 tok/s, which exposes about 40 ms of GPU work against roughly 25 ms of process CPU, so a token is 40 ms of GPU
+   plus 25 ms of CPU, partially overlapped.  `port/docs/BRAINSTORM-6.md` section 0.7 records the correction; the knobs
+   stay because proving what is not the bottleneck is worth an environment variable.

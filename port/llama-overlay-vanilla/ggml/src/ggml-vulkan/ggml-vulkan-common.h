@@ -285,8 +285,27 @@ size_t ggml_vk_descriptor_offset(size_t tensor_offset, size_t alignment, size_t 
 uint32_t ggml_vk_concat_unit_size(ggml_type type);
 bool ggml_vk_concat_supported(const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * dst);
 
+// STRATA_VK_TIME=1 also splits the recording cost: how much of it is the dispatch call itself, how much is the
+// barriers, and how much is everything else the node loop does (pipeline lookup, tensor views, push constant setup).
+inline double g_vk_cleanup_ms  = 0.0;
+inline int    g_vk_cleanup_n   = 0;
+inline double g_vk_end_ms      = 0.0;
+inline int    g_vk_end_n       = 0;
+inline double g_vk_fuse_ms     = 0.0;
+inline int    g_vk_fuse_n      = 0;
+inline double g_vk_dispatch_ms = 0.0;
+inline double g_vk_barrier_ms  = 0.0;
+inline int    g_vk_dispatch_n  = 0;
+inline int    g_vk_barrier_n   = 0;
+
+inline double ggml_vk_now_ms() {
+    using clock = std::chrono::steady_clock;
+    return std::chrono::duration<double, std::milli>(clock::now().time_since_epoch()).count();
+}
+
 template <typename T>
 inline void ggml_vk_dispatch_pipeline(ggml_backend_vk_context* ctx, vk_context& subctx, vk_pipeline& pipeline, std::initializer_list<vk::DescriptorBufferInfo> const& descriptor_buffer_infos, const T &push_constants, std::array<uint32_t, 3> elements) {
+    const double dispatch_t0 = g_vk_dispatch_ms >= 0.0 ? ggml_vk_now_ms() : 0.0;
     const uint32_t wg0 = CEIL_DIV(elements[0], pipeline->wg_denoms[0]);
     const uint32_t wg1 = CEIL_DIV(elements[1], pipeline->wg_denoms[1]);
     const uint32_t wg2 = CEIL_DIV(elements[2], pipeline->wg_denoms[2]);
@@ -351,6 +370,10 @@ inline void ggml_vk_dispatch_pipeline(ggml_backend_vk_context* ctx, vk_context& 
     {
         ggml_vk_debug_label dbg(subctx, pipeline->name, wg0, wg1, wg2);
         subctx->s->buffer->buf.dispatch(wg0, wg1, wg2);
+    }
+    if (g_vk_dispatch_ms >= 0.0) {
+        g_vk_dispatch_ms += ggml_vk_now_ms() - dispatch_t0;
+        g_vk_dispatch_n  += 1;
     }
 }
 

@@ -1191,6 +1191,16 @@ static std::atomic<uint64_t> g_vk_barriers{0};
 static std::map<int, uint64_t> g_vk_barrier_sites;
 
 void ggml_vk_sync_buffers(ggml_backend_vk_context* ctx, vk_context& subctx, int line) {
+    const double barrier_t0 = g_vk_barrier_ms >= 0.0 ? ggml_vk_now_ms() : 0.0;
+    struct barrier_scope {
+        double t0;
+        ~barrier_scope() {
+            if (g_vk_barrier_ms >= 0.0) {
+                g_vk_barrier_ms += ggml_vk_now_ms() - t0;
+                g_vk_barrier_n  += 1;
+            }
+        }
+    } barrier_scope_{ barrier_t0 };
     VK_LOG_DEBUG("ggml_vk_sync_buffers()");
 
     static const bool no_barrier = getenv("STRATA_VK_NO_BARRIER") != nullptr;
@@ -6524,6 +6534,16 @@ void ggml_vk_cmd_label_begin(vk::CommandBuffer buf, const char * name) {
 }
 
 void ggml_vk_ctx_end(vk_context& ctx) {
+    const double end_t0 = g_vk_end_ms >= 0.0 ? ggml_vk_now_ms() : 0.0;
+    struct end_scope {
+        double t0;
+        ~end_scope() {
+            if (g_vk_end_ms >= 0.0) {
+                g_vk_end_ms += ggml_vk_now_ms() - t0;
+                g_vk_end_n  += 1;
+            }
+        }
+    } end_scope_{ end_t0 };
     VK_LOG_DEBUG("ggml_vk_ctx_end(" << ctx << ", " << ctx->seqs.size() << ")");
     if (ctx->s == nullptr) {
         return;
@@ -14733,6 +14753,16 @@ void ggml_vk_synchronize(ggml_backend_vk_context * ctx) {
 }
 
 static void ggml_backend_vk_synchronize(ggml_backend_t backend) {
+    const double cleanup_t0 = g_vk_cleanup_ms >= 0.0 ? ggml_vk_now_ms() : 0.0;
+    struct cleanup_scope {
+        double t0;
+        ~cleanup_scope() {
+            if (g_vk_cleanup_ms >= 0.0) {
+                g_vk_cleanup_ms += ggml_vk_now_ms() - t0;
+                g_vk_cleanup_n  += 1;
+            }
+        }
+    } cleanup_scope_{ cleanup_t0 };
     VK_LOG_DEBUG("ggml_backend_vk_synchronize()");
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
 
@@ -14740,9 +14770,13 @@ static void ggml_backend_vk_synchronize(ggml_backend_t backend) {
     ggml_vk_synchronize(ctx);
     if (g_vk_time.on) {
         g_vk_time.wait_ms += vk_now_ms() - wait_t0;
-        fprintf(stderr, "[time] record=%.3fms submit=%.3fms wait=%.3fms submits=%d\n",
+        fprintf(stderr, "[time] record=%.3fms submit=%.3fms wait=%.3fms submits=%d dispatch=%.3fms (%d) "
+                "barrier=%.3fms (%d) fusion=%.3fms (%d) end=%.3fms (%d) other=%.3fms cleanup(prev)=%.3fms\n",
                 g_vk_time.graph_ms - g_vk_time.submit_ms, g_vk_time.submit_ms, g_vk_time.wait_ms,
-                g_vk_time.submits);
+                g_vk_time.submits, g_vk_dispatch_ms, g_vk_dispatch_n, g_vk_barrier_ms, g_vk_barrier_n,
+                g_vk_fuse_ms, g_vk_fuse_n, g_vk_end_ms, g_vk_end_n,
+                g_vk_time.graph_ms - g_vk_time.submit_ms - g_vk_dispatch_ms - g_vk_barrier_ms - g_vk_fuse_ms
+                    - g_vk_end_ms, g_vk_cleanup_ms);
     }
 
     ggml_vk_graph_cleanup(ctx);
@@ -15582,6 +15616,11 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
     if (!g_vk_time.init) {
         g_vk_time.init = true;
         g_vk_time.on   = getenv("STRATA_VK_TIME") != nullptr;
+        g_vk_dispatch_ms = g_vk_time.on ? 0.0 : -1.0;   // negative = bucket off
+        g_vk_barrier_ms  = g_vk_time.on ? 0.0 : -1.0;
+        g_vk_fuse_ms     = g_vk_time.on ? 0.0 : -1.0;
+        g_vk_end_ms      = g_vk_time.on ? 0.0 : -1.0;
+        g_vk_cleanup_ms  = g_vk_time.on ? 0.0 : -1.0;
     }
     const double graph_t0 = g_vk_time.on ? vk_now_ms() : 0.0;
     if (g_vk_time.on) {
@@ -15589,6 +15628,16 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         g_vk_time.submit_ms = 0.0;
         g_vk_time.wait_ms   = 0.0;
         g_vk_time.submits   = 0;
+        g_vk_dispatch_ms    = 0.0;
+        g_vk_barrier_ms     = 0.0;
+        g_vk_dispatch_n     = 0;
+        g_vk_barrier_n      = 0;
+        g_vk_fuse_ms        = 0.0;
+        g_vk_fuse_n         = 0;
+        g_vk_end_ms         = 0.0;
+        g_vk_end_n          = 0;
+        g_vk_cleanup_ms     = 0.0;
+        g_vk_cleanup_n      = 0;
     }
     struct graph_scope {
         double t0; bool on;
@@ -15721,6 +15770,15 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
     // small graphs gain nothing from splitting, each submit costs CPU time
     uint64_t flops_per_submit = ctx->last_total_flops < 1'000'000'000ULL ? 0 :
         std::clamp(ctx->last_total_flops / 40u, std::min<uint64_t>(100'000'000ULL, flops_cap), flops_cap);
+    // STRATA_VK_SUBMITS=N: cap how many command buffers a graph is split into.  Fewer submits means fewer
+    // vkEndCommandBuffer/vkQueueSubmit pairs, which is where a driver with slow command buffer teardown spends its time.
+    static const int strata_max_submits = [] {
+        const char * s = std::getenv("STRATA_VK_SUBMITS");
+        return s != nullptr ? std::atoi(s) : 0;
+    }();
+    if (strata_max_submits > 0 && ctx->last_total_flops >= 1'000'000'000ULL) {
+        flops_per_submit = strata_max_submits == 1 ? UINT64_MAX : std::max<uint64_t>(flops_per_submit, 1);
+    }
 
     auto const submit_after = [&](int start, int end) {
         if (ctx->device->serialize_submissions) {
@@ -15788,6 +15846,16 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         ctx->fused_rms_norm_mode = RMS_NORM_COUNT;
         const char *fusion_string {};
         if (!ctx->device->disable_fusion) {
+            const double fuse_t0 = g_vk_fuse_ms >= 0.0 ? ggml_vk_now_ms() : 0.0;
+            struct fuse_scope {
+                double t0;
+                ~fuse_scope() {
+                    if (g_vk_fuse_ms >= 0.0) {
+                        g_vk_fuse_ms += ggml_vk_now_ms() - t0;
+                        g_vk_fuse_n  += 1;
+                    }
+                }
+            } fuse_scope_{ fuse_t0 };
             uint32_t num_adds = ggml_vk_fuse_multi_add(ctx, cgraph, i);
             if (num_adds) {
                 ctx->num_additional_fused_ops = num_adds - 1;

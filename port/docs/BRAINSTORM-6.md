@@ -75,6 +75,32 @@
 下一步要定位那 26 µs 花在哪：描述符集写入、`vkCmdPipelineBarrier`（第四阶段实测约 **5 µs/次**）、push constant、
 pipeline 绑定，还是 `vkCmdUpdateBuffer`。做法与本次相同：在 `ggml_vk_dispatch_pipeline` 里加同类累加器。
 
+### 0.7 **自我更正：不是"CPU 录制受限"，是 GPU 内核 + 部分未重叠的 host**
+
+按 §0.6 的下一步把录制拆开后，结论**不成立**。同一次 decode（8 token，Q2_0）的分桶：
+
+| 分桶 | 时间 | 次数 | 每次 |
+| --- | --- | --- | --- |
+| `dispatch`（`ggml_vk_dispatch_pipeline` 全函数） | 1.23 ms | 2 512 | **0.49 µs** |
+| `barrier`（`ggml_vk_sync_buffers`） | 0.07 ms | 1 822 | 0.04 µs |
+| `submit`（`ggml_vk_submit`） | 0.84 ms | 27 | 31 µs |
+| `fusion`（整条融合匹配链） | 0.79 ms | 4 804 | 0.16 µs |
+| `end`（`ggml_vk_ctx_end`） | 0.02 ms | 27 | 0.6 µs |
+| `cleanup`（含 `resetCommandPool`） | 0.12 ms | 1 | — |
+| **`other`（未归属）** | **69.4 ms** | — | — |
+
+再加两个决定性对照：
+- 把每次图的提交数从 26 改成 1/4（`STRATA_VK_SUBMITS=N`）：**15.4 / 15.8 / 15.6 / 17.7 tok/s，全部在噪声内** ⇒ 提交与
+  命令缓冲开销**不是**瓶颈；
+- `GGML_VK_SERIALIZE_SUBMISSIONS=1`：Q2_0 15.5 → 9.5 tok/s ⇒ **GPU 真实耗时 ≈40 ms**；
+- engine 的进程 CPU 时间 ≈ **25 ms/token**（serialize 前后几乎不变，说明它只统计真正的 CPU 占用）。
+
+**修正后的账本**：wall 66 ms ≈ GPU 40 ms + 未完全重叠的 host ~25 ms。
+**每-dispatch 的 CPU 成本其实只有 0.5 µs**（此前估的 26 µs 是把 `record` 的墙钟当成了 CPU），所以"削减录制成本"这条**不成立**，
+第一优先回到**GPU 内核效率**（Q2_0 66 GB/s vs 墙 140 GB/s）。
+
+`STRATA_VK_TIME` 与 `STRATA_VK_SUBMITS` 两个开关保留（它们证明了"什么**不是**瓶颈"），但本轮不据此立项。
+
 ---
 
 ## 1. 让 Q2_0 的 matvec 吃到带宽（最高优先级）
