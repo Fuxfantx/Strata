@@ -160,6 +160,12 @@ public:
         Clock::time_point tg = Clock::now();
         const double decode_cpu0 = process_cpu_ms();
 
+        // STRATA_VK_PROFILE=1: the per-token loop is decode plus sampling; timing the two separately is what says
+        // whether the wall time outside the graph belongs to the backend or to the sampler.
+        static const bool profile_tok = std::getenv("STRATA_VK_PROFILE") != nullptr;
+        double acc_decode = 0.0, acc_sample = 0.0;
+        int    n_steps    = 0;
+
         bool first_decode_pending = true;
         while (true) {
             if (g_stop) { st.finish = "stop"; break; }
@@ -195,6 +201,10 @@ public:
                 const bool rdc = rdc_capture_wanted(st.generated);
                 if (rdc) rdc_capture_begin();
                 if (!decode(&tok, 1, pos, true)) { st.finish = "error"; break; }
+                if (profile_tok) {
+                    acc_decode += ms_since(ts);
+                    ++n_steps;
+                }
                 if (rdc) rdc_capture_end();
                 if (first_decode_pending) {
                     // st.generated already counts the token being decoded, so the first step is tracked by hand
@@ -204,7 +214,13 @@ public:
                 pace_step(opt_.perf_cap);
                 kv_tokens_.push_back(tok);
                 if (can_mtp && mtp_primed_) mtp_.observe(&tok, 1, pos);
-                tok = llama_sampler_sample(smpl, ctx_, -1);
+                {
+                    const Clock::time_point tsamp = Clock::now();
+                    tok = llama_sampler_sample(smpl, ctx_, -1);
+                    if (profile_tok) {
+                        acc_sample += ms_since(tsamp);
+                    }
+                }
                 continue;
             }
 
@@ -229,6 +245,12 @@ public:
 
         st.decode_ms = ms_since(tg);
         st.decode_cpu_ms = process_cpu_ms() - decode_cpu0;
+        if (profile_tok && n_steps > 0) {
+            const double wall = st.decode_ms;
+            logf("[strata-vk] token loop: decode %.2f ms, sample %.2f ms, rest %.2f ms per token (%d steps)\n",
+                 acc_decode / n_steps, acc_sample / n_steps,
+                 (wall - acc_decode - acc_sample) / n_steps, n_steps);
+        }
         // decode_ms is already wall time (the pacing slept inside the loop), so it needs no rescaling.
         llama_sampler_free(smpl);
         if (st.finish == "error") reset();

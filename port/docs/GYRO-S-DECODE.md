@@ -161,3 +161,41 @@ overlay 里**已经有** `src/llama-ple-disk.cpp`（直接 I/O + 256 MiB 直接�
 
 命中率由“不同行的数量”决定，不是冲突率，所以两种形状接近；真正去掉的是**冲突导致的长尾**（同一行被反复顶掉），
 这也是主流选 8 路的原因。收益仍然低于可测门限，但结构上更正确，按约定**保留**。
+
+## 10. D 组（host 侧）：**引擎每 token 只有 0.17 ms 是自己的**，其余全在 `llama_decode` 里
+
+### 10.1 实测拆分
+
+在 `Engine::generate` 的 token 循环里分别给 `decode()` 与 `llama_sampler_sample()` 计时（`STRATA_VK_PROFILE=1`）：
+
+| 项 | 每 token |
+| --- | --- |
+| `decode()`（= `llama_decode`） | **102.97 ms** |
+| `llama_sampler_sample()`（150k 词表） | **0.14 ms** |
+| 其它（detok、KV 记账、pacing） | **0.01 ms** |
+
+⇒ **引擎自己的 host 工作可以忽略**；整个 token 就是 `llama_decode`。D 组里"削减引擎侧 host 成本"这条**没有可做的东西**，
+这不是猜测，是把循环里仅有的三次调用都计了时。
+
+### 10.2 那 103 ms 里还有什么：命令池轮转（已落地，实测中性）
+
+`llama_decode` 内部（`graph_compute`）的墙钟约 100 ms，而进程 CPU 只有约 30 ms，提交 0.85 ms、fence 等待 0.001 ms。
+唯一没被计时覆盖的阻塞点是**命令池复用**：一个 token 从**同一个** `VkCommandPool` 里录 27 个命令缓冲，随后 reset 它。
+
+改动：`compute_cmd_pool` → **3 个池轮转**（`COMPUTE_POOLS = 3`），一个池要隔两个 token 才会被重新取出，此时 GPU 早已完成。
+命令、顺序、数值都不变，只换"下一个 context 来自哪个池"。
+
+| 指标 | 改动前 | 改动后 |
+| --- | --- | --- |
+| token 流 | — | **逐 token 相同** ✓ |
+| decode（`--tokens --n 32`） | 9.6-9.9 tok/s | 9.9 tok/s（噪声内） |
+| token 循环 profile | decode 102.97 ms | decode 103.98 ms |
+
+⇒ 池复用**不是**那 70 ms 的来源，但这个改动**去掉了一个真实的在飞复用隐患**（driver 若要在复位前等待，就会变成阻塞），
+实测中性、token 相同，按约定**保留**。
+
+### 10.3 结论：D 组到此为止，剩下的 70 ms 在 GPU 侧
+
+103 ms = 30 ms 的进程 CPU + 约 70 ms 的非 CPU 时间，而引擎侧只占 0.17 ms ⇒ **那 70 ms 只能来自 GPU 执行**。
+按 4.1 GiB/token 计算，相当于 **≈59 GB/s**（墙 137-145），即 GPU 侧还有约 2.3x 的余量 —— 与第六阶段的结论一致：
+**下一步要提高的是内核效率与逐元素尾巴，不是 host 代码**。

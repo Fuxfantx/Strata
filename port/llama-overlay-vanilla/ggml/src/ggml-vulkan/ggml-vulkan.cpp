@@ -6218,7 +6218,9 @@ void ggml_vk_init(ggml_backend_vk_context * ctx, size_t idx) {
     ctx->fence = ctx->device->device.createFence({});
     ctx->almost_ready_fence = ctx->device->device.createFence({});
 
-    ctx->compute_cmd_pool.init(ctx->device, ctx->device->compute_queue.get());
+    for (uint32_t i = 0; i < ggml_backend_vk_context::COMPUTE_POOLS; ++i) {
+        ctx->compute_cmd_pools[i].init(ctx->device, ctx->device->compute_queue.get());
+    }
     if (ctx->device->async_use_transfer_queue) {
         vk::SemaphoreTypeCreateInfo tci{ vk::SemaphoreType::eTimeline, 0 };
         vk::SemaphoreCreateInfo ci{};
@@ -6588,7 +6590,9 @@ vk_context ggml_vk_get_compute_ctx(ggml_backend_vk_context * ctx) {
     if (!ctx->compute_ctx.expired()) {
         result = ctx->compute_ctx.lock();
     } else {
-        result = ggml_vk_create_context(ctx, ctx->compute_cmd_pool);
+        vk_command_pool & pool = ctx->compute_cmd_pools[ctx->compute_pool_idx];
+        ctx->compute_pool_idx = (ctx->compute_pool_idx + 1) % ggml_backend_vk_context::COMPUTE_POOLS;
+        result = ggml_vk_create_context(ctx, pool);
 
         ctx->compute_ctx = result;
         ggml_vk_ctx_begin(ctx->device, result);
@@ -14107,7 +14111,9 @@ void ggml_vk_graph_cleanup(ggml_backend_vk_context * ctx) {
     ctx->unsynced_nodes_read.clear();
     ctx->prealloc_x_need_sync = ctx->prealloc_y_need_sync = ctx->prealloc_split_k_need_sync = false;
 
-    ggml_vk_command_pool_cleanup(ctx->device, ctx->compute_cmd_pool);
+    for (uint32_t i = 0; i < ggml_backend_vk_context::COMPUTE_POOLS; ++i) {
+        ggml_vk_command_pool_cleanup(ctx->device, ctx->compute_cmd_pools[i]);
+    }
     if (ctx->device->async_use_transfer_queue) {
         ggml_vk_command_pool_cleanup(ctx->device, ctx->transfer_cmd_pool);
     }
@@ -14179,7 +14185,9 @@ void ggml_vk_cleanup(ggml_backend_vk_context * ctx) {
     ctx->descriptor_sets.clear();
     ctx->descriptor_set_bindings.clear();
 
-    ctx->compute_cmd_pool.destroy(ctx->device->device);
+    for (uint32_t i = 0; i < ggml_backend_vk_context::COMPUTE_POOLS; ++i) {
+        ctx->compute_cmd_pools[i].destroy(ctx->device->device);
+    }
     if (ctx->device->async_use_transfer_queue) {
         ctx->device->device.destroySemaphore(ctx->transfer_semaphore.s);
 

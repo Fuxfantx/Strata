@@ -1335,7 +1335,11 @@ struct ggml_backend_vk_context {
     uint32_t descriptor_set_idx {};
     uint32_t pipeline_descriptor_set_requirements {};
 
-    vk_command_pool compute_cmd_pool;
+    // Three compute pools in rotation.  A pool is only reused two tokens after the graph that filled it, so a driver
+    // that waits for in-flight command buffers before reusing a pool never makes the CPU wait for the GPU here.
+    static constexpr uint32_t COMPUTE_POOLS = 3;
+    vk_command_pool compute_cmd_pools[COMPUTE_POOLS];
+    uint32_t        compute_pool_idx {};
     vk_command_pool transfer_cmd_pool;
 
     // number of additional consecutive nodes that are being fused with the
