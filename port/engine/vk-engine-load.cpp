@@ -199,6 +199,10 @@ llama_model * Engine::load_model(const Options & opt, const NpuPlan & npu) {
     const size_t resident  = pack_bytes > ple_bytes ? pack_bytes - ple_bytes : pack_bytes;
 
     llama_model_params mp = llama_model_default_params();
+
+    // An optional companion pack: the tensors it carries replace the model's own, so a dense layer requantised to a
+    // faster type is used from there while the experts still come from the main pack.
+    mp.compat_path = opt.compat.empty() ? nullptr : opt.compat.c_str();
     mp.n_gpu_layers   = backend_ == GpuBackend::CPU ? 0 : 999;   // everything the backend will take
     // Direct I/O reads the file straight into the destination buffers; mmap maps it and then copies.  Measured on this
     // machine, direct is faster for every model here because the copy dominates: Gyro-M 87.3 -> 51.5 s, the Q2 pack

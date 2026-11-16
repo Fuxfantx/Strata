@@ -62,6 +62,9 @@ struct Options {
     std::string kv  = "f16";
     bool dry_run    = false;   // print the effective policy and exit, without loading the weights
     std::string mtp;                  // --mtp FILE: the nextn head that drafts (see vk-mtp.h)
+
+    // --compat FILE: optional companion pack with requantised copies of some tensors (make-compat.ps1)
+    std::string compat;
     Tri  lazy       = Tri::Auto;      // the engine forwards Strata's policy, it does not choose
     std::string load_mode = "direct";  // --load-mode mmap|direct|none: measured, see vk-engine-load.cpp
     bool load_mode_set = false;        // the user named --load-mode, so a pack that does not fit must not override it

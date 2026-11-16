@@ -318,7 +318,8 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
     try {
         llama_model_loader ml(metadata, set_tensor_data, set_tensor_data_ud, fname, splits, file, params.load_mode,
             params.check_tensors, params.no_alloc, params.load_mtp, params.kv_overrides, params.tensor_buft_overrides,
-            params.mtp_path ? params.mtp_path : "");
+            params.mtp_path ? params.mtp_path : "",
+            params.compat_path ? params.compat_path : "");
 
         ml.lazy.mode = params.lazy_mode;
 

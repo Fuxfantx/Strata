@@ -584,7 +584,8 @@ llama_model_loader::llama_model_loader(
         bool load_mtp,
         const llama_model_kv_override * param_overrides_p,
         const llama_model_tensor_buft_override * param_tensor_buft_overrides_p,
-        const std::string & mtp_path)
+        const std::string & mtp_path,
+        const std::string & compat_path)
         : metadata(meta), set_tensor_data(set_tensor_data), set_tensor_data_ud(set_tensor_data_ud) {
     int trace = 0;
     if (getenv("LLAMA_TRACE")) {
@@ -911,6 +912,51 @@ llama_model_loader::llama_model_loader(
 
         LLAMA_LOG_INFO("%s: grafted %d MTP tensor(s) from %s (%d already provided by the model)\n",
                 __func__, n_added, mtp_path.c_str(), n_skipped);
+    }
+
+    // A companion pack carries requantised copies of some tensors (the dense weights, typically) in a faster type.  Each
+    // one replaces the entry the main pack provided: get_tensor_meta returns the weight's own tensor, so the model builds
+    // that tensor with the companion's type and reads its bytes from the companion file.
+    if (!compat_path.empty()) {
+        struct ggml_context * compat_ctx = NULL;
+        struct gguf_init_params compat_params = {
+            /*.no_alloc = */ true,
+            /*.ctx      = */ &compat_ctx,
+        };
+
+        compat_metadata.reset(gguf_init_from_file(compat_path.c_str(), compat_params));
+        if (compat_metadata == nullptr) {
+            LLAMA_LOG_WARN("%s: cannot open the companion pack %s; using the model's own tensors\n",
+                    __func__, compat_path.c_str());
+        } else {
+            files.emplace_back(new llama_file(compat_path.c_str(), "rb", use_direct_io));
+            contexts.emplace_back(compat_ctx);
+
+            int n_replaced = 0;
+            int n_unknown  = 0;
+            int n_mismatch = 0;
+            for (ggml_tensor * cur = ggml_get_first_tensor(compat_ctx); cur; cur = ggml_get_next_tensor(compat_ctx, cur)) {
+                const std::string tensor_name = cur->name;
+                auto it = weights_map.find(tensor_name);
+                if (it == weights_map.end()) {
+                    ++n_unknown;
+                    continue;
+                }
+                const ggml_tensor * orig = it->second.tensor;
+                if (ggml_nelements(cur) != ggml_nelements(orig)) {
+                    LLAMA_LOG_WARN("%s: companion tensor %s has %lld elements, the model's has %lld; keeping the model's\n",
+                            __func__, tensor_name.c_str(), (long long) ggml_nelements(cur), (long long) ggml_nelements(orig));
+                    ++n_mismatch;
+                    continue;
+                }
+                it->second = llama_tensor_weight(files.back().get(), (uint16_t) (files.size() - 1),
+                                                 compat_metadata.get(), cur);
+                ++n_replaced;
+            }
+
+            LLAMA_LOG_INFO("%s: companion pack %s replaced %d tensor(s) (%d not in the model, %d shape mismatches)\n",
+                    __func__, compat_path.c_str(), n_replaced, n_unknown, n_mismatch);
+        }
     }
 
     n_kv      = gguf_get_n_kv(metadata);

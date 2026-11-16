@@ -127,6 +127,7 @@ struct llama_model_loader {
 
     gguf_context_ptr metadata_ptr;
     gguf_context_ptr mtp_metadata; // the separate nextn-only gguf, when one was grafted
+    gguf_context_ptr compat_metadata; // companion pack with requantised tensors, when given
 
     // true when a separate nextn-only gguf was grafted onto this model
     bool has_mtp_head() const { return mtp_metadata != nullptr; }
@@ -186,7 +187,8 @@ struct llama_model_loader {
         bool load_mtp,
         const llama_model_kv_override * param_overrides_p,
         const llama_model_tensor_buft_override * param_tensor_buft_overrides_p,
-        const std::string & mtp_path);
+        const std::string & mtp_path,
+        const std::string & compat_path);
 
     template<typename T>
     typename std::enable_if<std::is_integral<T>::value, bool>::type

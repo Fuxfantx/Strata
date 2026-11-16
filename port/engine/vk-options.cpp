@@ -54,6 +54,7 @@ void print_help() {
                 "  --dry-run                print the placement and tuning that the flags resolve to, then exit\n"
                 "  --load-mode mmap|direct|none  how the weights reach their buffers (default mmap)\n"
                 "  --mtp MTP.gguf           draft from a trained nextn head (needs the loader graft, vk-mtp.h)\n"
+                "  --compat COMPAT.gguf     use a companion pack for the tensors it carries (port/tools/make-compat.ps1)\n"
                 "  --npu off|auto|head|dense|all|split  Hexagon NPU placement: none, find only, output head, dense, whole\n"
                 "                           graph, or split (the last --npu-layers layers + head on the HTP)\n"
                 "                           (head needs a per-buffer budget above ggml-hexagon's 1 GiB default on a\n" 
@@ -115,6 +116,7 @@ Options parse_args(int argc, char ** argv) {
         else if (a == "--prompt" || a == "-p") { if (take()) o.prompt = v; }
         else if (a == "--kv" || a == "--kv-type" || a == "--cache-type-k" || a == "--cache-type-v") { if (take()) o.kv = v; }
         else if (a == "--dry-run") { o.dry_run = true; }
+        else if (a == "--compat") { if (take()) o.compat = v; }
         else if (a == "--mtp") { if (take()) o.mtp = v; }
         else if (a == "--lazy-mode") { if (take()) o.lazy = parse_tri(v); }
         else if (a == "--load-mode") { if (take()) { o.load_mode = v; o.load_mode_set = true; } }

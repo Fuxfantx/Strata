@@ -368,6 +368,11 @@ extern "C" {
         bool no_alloc;        // only load metadata and simulate memory allocations
         bool load_mtp;        // whether to load MTP layers
         const char * mtp_path; // separate nextn-only gguf to graft; null to use tensors already in the model
+
+        // Optional companion pack holding requantised copies of some tensors (port/tools/make-compat.ps1).
+        // Each tensor it carries replaces the model's own, so the model builds it with the companion type; every
+        // other tensor is read from the main pack.  Null keeps the original behaviour.
+        const char * compat_path;
     };
 
     struct llama_sampler_seq_config {
