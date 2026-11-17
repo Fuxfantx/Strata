@@ -9559,7 +9559,7 @@ def start_replicas(cfg: dict, groups: list[list[int]], exe: str, effort_end: lis
     from serve import replicas as rp
     n = len(groups)
     cpus = rp.cpu_sets(n, cfg.get("replica_cpus") is not False)
-    print(f"[strata] {n} replicas on the cards {' | '.join(','.join(map(str, g)) for g in groups)}"
+    print(f"[strata] {n} replicas on the cards {' | '.join(','.join(map(str, g)) if g else 'cpu' for g in groups)}"
           f"{' (own CPU cores each)' if cpus else ''}: requests go to the least busy one, a conversation back to its own",
           flush=True)
     engines: list = [None] * n
@@ -10024,6 +10024,11 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
                     help="data-parallel replicas (opt-in): cut the \"gpu\" list into N equal groups and run one engine on "
                          "each, requests spread over them (also \"replicas\" in the config: a number, or "
                          "[{\"gpus\": [0, 1]}, {\"gpus\": [2, 3]}])")
+    ap.add_argument("--replicas-cpu", type=int, default=None, metavar="N",
+                    help="add N replicas that run the engine's CPU backend, beside the card replicas (opt-in; also "
+                         "\"replicas\": [{\"gpus\": [0]}, {\"backend\": \"cpu\"}] in the config). For a machine with one "
+                         "integrated GPU this is the only second worker: two engines on the same mapped pack measure +39%% "
+                         "aggregate, and the CPU one is slower in the pair (port/docs/PERFORMANCE.md 17)")
     ap.add_argument("--split-serve", default=None, metavar="PREFILL,DECODE",
                     help="split serving (opt-in): one engine on card PREFILL reads the prompt, a second on card DECODE makes "
                          "the answer, the session handed over in RAM (also \"split_serve\" in the config: "
@@ -10106,6 +10111,15 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
     lift_reasoning_effort_arg(cfg)
     if a.replicas is not None:
         cfg["replicas"] = a.replicas
+    if a.replicas_cpu is not None:
+        # One integrated GPU has no card list to cut, so the only second worker is the CPU backend.  --replicas-cpu N adds N of
+        # them beside whatever card replicas the config names; the value is a list of {"gpus": ...} / {"backend": "cpu"} entries
+        # by the time gpu_groups sees it.  Measured: +39% aggregate for two concurrent requests, port/docs/PERFORMANCE.md 17.
+        from serve import replicas as _rp
+        try:
+            cfg = _rp.with_cpu_replicas(cfg, a.replicas_cpu)
+        except _rp.ReplicaConfigError as e:
+            ap.error(f"--replicas-cpu: {e}")
     if a.split_serve is not None:
         pair = [x.strip() for x in a.split_serve.split(",")]
         if len(pair) != 2 or not all(x.isdecimal() for x in pair):

@@ -1,7 +1,7 @@
 # The Adreno X2-90, as measured
 
 Everything here is measured on this machine, with the command or environment variable that produces it named next to the
-number. `PORT-STATE.md` has the resulting tree state, the build and the gate list.
+number. `PERFORMANCE.md` has the resulting state, the build and the gate list.
 
 ## Hardware facts that bound every design
 
@@ -35,12 +35,15 @@ cooperative matrix was brought in for.
 
 ## Decode: where the bandwidth goes
 
-Per-op figures come from the backend's perf logger (`GGML_VK_PERF_LOGGER=1`); the class split is `PORT-STATE.md`'s
+Per-op figures come from the backend's perf logger (`GGML_VK_PERF_LOGGER=1`); the class split is `PERFORMANCE.md`'s
 ablation. What matters for design:
 
 * The dense packs are at the memory wall, so **decode work is graph and dispatch work, not bandwidth work**. The host gap was
   once blamed on command recording; instrumenting the backend's encode loop (`GGML_VK_ENCTIME`) showed **1.3-2.6 ms for a
-  3687-node MoE graph**, so recording is not the cost - the gap is GPU idle time between small ops.
+  3687-node MoE graph**, so recording is not the cost. The gap is **not** the GPU going idle either: `STRATA_VK_TIME=1` on Gyro-S
+  puts **95.4 of a token's 100.5 ms inside the blocked submit with no fence wait and only 29 ms of host CPU**, i.e. the GPU is
+  ~95% **busy** and only moving 43 GB/s over the whole token while its matmuls alone run at 118 GB/s. The small ops are busy and
+  latency-bound, so merging nodes does not help (`PERFORMANCE.md` §2 has the measurements and what shape would).
 * Cutting nodes was measured and was **neutral**: the per-layer-embedding convolution used to emit a `cont` and a `cast` per
   tap, and folding them to one per layer changed nothing measurable because the graph optimizer already folded them.
 * The multi-row matvec (upstream's MMVQ) is already the default where it helps: forcing it off costs the MoE **7%**
@@ -76,7 +79,7 @@ fast:
    Gyro-M half its prefill);
 3. the engine turns the path on per model from the GGUF header, with `STRATA_VK_F16ACC=0` as the override.
 
-Default results (same commands as `PORT-STATE.md`):
+Default results (same commands as `PERFORMANCE.md`):
 
 | model | prefill | decode | before this path |
 | --- | --- | --- | --- |
@@ -101,15 +104,22 @@ and the fp16 arm needed its own creation block because its dependencies sit in t
 | 35B-A3B | **43.1** | 187.6 | **612.7** | 38.96 -> 43.1 decode, 198.9 -> 612.7 pp512 |
 
 The two big movers are not new kernels: Gyro-M/Q2_0 come from an oversized pack keeping its experts on the device
-instead of staging them through a 4 GiB bank (see `OPTIMIZATION-BACKLOG.md`, phase 2 round 2), and 35B-A3B's prefill from
+instead of staging them through a 4 GiB bank (see `PERFORMANCE.md`, phase 2 round 2), and 35B-A3B's prefill from
 the cooperative path no longer being gated on a 64-token batch (round 21). Gyro-S's decode is the trellis matvec's rows
 per workgroup (round 29). The bench now also prints the first decode step separately, because averaging a cold first
 token into the rate hid a 3.35 s stall for about ten rounds.
 
 ## The accuracy question, answered by measurement
 
+> **Correction (2026-11-18).** The paragraph below claimed that the f16-accumulate kernel "reproduces the token stream:
+> CPU-vs-Vulkan token streams are identical on all five packs". That was measured with 32-token greedy continuations and
+> it is false. With `--dump-logits` on the full vocabulary, the kernel's logits correlate **0.02** with the CPU backend's
+> and pick a different token, on all three packs tried (Gyro-S, 35B-A3B, 27B; `PERFORMANCE.md` §4.1 has the table). The
+> kernel is off by default (`ModelPolicy::coop_f16acc = false`) and reachable only with `STRATA_VK_F16ACC=1`.
+> The error table below is real and was the visible half of the same problem.
+
 The f16-accumulate kernel computes in f16, so it cannot pass an element-wise comparison against an f32 reference. What it
-does do is reproduce the token stream: **CPU-vs-Vulkan token streams are identical on all five packs**. The error profile,
+was believed to do is reproduce the token stream: **CPU-vs-Vulkan token streams are identical on all five packs**. The error profile,
 measured with `mm-probe --verify` (q4_0, m=512, n=64, max relative error against the f32 reference):
 
 | k | f16-accumulate cooperative | dp4a for comparison |
@@ -174,6 +184,11 @@ So the kernel is correct inside llama.cpp's graph and produces zeros/garbage whe
 directly. That is a backend bug in the direct-graph path (the likely difference is the prealloc/reformat planning that
 `ggml_backend_sched` triggers), and it is why the oracle cannot certify this path at any tolerance: it never gets a
 meaningful result to compare.
+
+> **Correction (2026-11-18).** The paragraph above is wrong, and the harnesses were right. Run inside the engine's own
+> graph, the kernel's logits correlate 0.02 with the CPU backend's and the top token changes (`PERFORMANCE.md` §4.1).
+> The 20/38 with `ERR = 76.0` / `964.7` below was the real signal, not a direct-graph artifact. Keep this section as the
+> record of how long a weak gate (32 greedy tokens) can hide a kernel that is not doing the whole job.
 
 The measured accuracy of the two families, where it can be measured at all (`mm-probe --verify`, m=512, n=64):
 

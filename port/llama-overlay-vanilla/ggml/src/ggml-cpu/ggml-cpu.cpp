@@ -94,6 +94,17 @@ static bool ggml_backend_cpu_is_extra_buffer_type(ggml_backend_buffer_type_t buf
     return false;
 }
 
+// STRATA_CPU_REPACK: the repack weight path, on unless the variable says 0. It is a runtime switch rather than a build option
+// because the trade it makes is a memory one - a repacked weight is an anonymous copy, a mapped weight is a file page - and only a
+// run on the pack in hand can say which side wins.
+static bool ggml_backend_cpu_repack_enabled(void) {
+    static const bool enabled = []() {
+        const char * env = getenv("STRATA_CPU_REPACK");
+        return env == nullptr || atoi(env) != 0;
+    }();
+    return enabled;
+}
+
 // CPU backend - backend (stream)
 
 struct ggml_backend_cpu_context {
@@ -432,9 +443,17 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
     // A node whose source lives in another backend's buffer cannot be computed here: the scheduler would keep it on the CPU and
     // read device memory as host memory. Saying no is what makes the scheduler copy across the boundary. (The graphics backend
     // has the same rule; see HYBRID.md for why both halves are needed.)
+    //
+    // This backend's own extra buffer types are host memory: they are allocated by the CPU backend, repacked on the host and read
+    // in place, which is why supports_buft() accepts them (see below) and why they must not be caught by the rule above. Without the
+    // exemption the rule also rejects a repacked weight, select_weight_buft finds no buft for it, and ggml-cpu/repack.cpp is dead
+    // code at run time - which is what happened here until the exemption was added. STRATA_CPU_REPACK=0 turns the repack path off
+    // again for an A/B, because a repacked tensor is anonymous memory where a mapped one was a file page, and on a pack larger than
+    // RAM that difference decides whether the run fits.
     for (int i = 0; i < GGML_MAX_SRC; i++) {
         if (op->src[i] != nullptr && op->src[i]->buffer != nullptr &&
-            !ggml_backend_buffer_is_host(op->src[i]->buffer)) {
+            !ggml_backend_buffer_is_host(op->src[i]->buffer) &&
+            !(ggml_backend_cpu_repack_enabled() && ggml_backend_cpu_is_extra_buffer_type(op->src[i]->buffer->buft))) {
             return false;
         }
     }

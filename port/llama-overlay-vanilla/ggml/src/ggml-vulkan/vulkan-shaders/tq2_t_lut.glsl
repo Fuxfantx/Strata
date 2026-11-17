@@ -264,14 +264,26 @@ const uint tq2t_lut_const[2048] = {
     0x3f9f1038u, 0x399fade8u, 0xb9da3363u, 0x37c83909u, 0xbc4c3c82u, 0xb788bc3au, 0x39daa897u, 0x3beeb6d2u
 };
 
+// Default: the per-workgroup shared copy.  The alternative - indexing the constant array directly - was tried and is four times
+// slower on this driver (Gyro-S decode 2.43 against 10.2 tok/s, tokens identical): a large GLSL `const` array with a dynamic index
+// does not stay in fast memory, so every trellis step pays a private-memory read instead of a shared one.  The 8 KiB of shared
+// memory the copy costs is therefore not overhead to remove, it is what makes the kernel usable.
+// Define TQ_LUT_DIRECT to reproduce the direct-indexing experiment.
 #ifdef TQ_LUT_DIRECT
-// Experiment: index the constant array directly (no per-workgroup shared copy).
 #define tq2t_lut tq2t_lut_const
 // Some shaders call init_iq_shmem unconditionally; nothing to copy here.
 void init_iq_shmem(uvec3 wgsize) {}
 #else
 // 8 KiB per workgroup; one 32-bit shared load returns both weights of a pair.
 shared uint tq2t_lut[2048];
+
+// TQ_LUT_PAD4K: measurement only.  4 more KiB of shared memory halve the workgroups this device can keep resident (32 KiB of
+// shared per compute unit, so 8 KiB allows four and 12 KiB allows two).  Adding it and measuring says whether residency is what
+// bounds the trellis matvec: a large loss means the 8 KiB table is the ceiling and only a smaller table would move it; nothing
+// measurable means residency is not the limiter and the shader has some other cost.
+#ifdef TQ_LUT_PAD4K
+shared uint tq_lut_pad[1024];
+#endif
 
 #define NEEDS_INIT_IQ_SHMEM
 void init_iq_shmem(uvec3 wgsize)
@@ -283,9 +295,13 @@ void init_iq_shmem(uvec3 wgsize)
             tq2t_lut[idx] = tq2t_lut_const[idx];
         }
     }
+#ifdef TQ_LUT_PAD4K
+    // touched once so the allocation cannot be dropped as unused
+    if (gl_LocalInvocationIndex.x == 0u) { tq_lut_pad[0] = tq2t_lut_const[0]; }
+#endif
     barrier();
 }
-#endif // TQ_LUT_DIRECT
+#endif
 
 // Codebook index of trellis entry e = 2*s + p (see tq2t_hyb_index in ggml-common.h).
 const uint TQ_STATE_MASK = 0x7fffu; // 15-bit trellis states (TQ_STATE_BITS in ggml-common.h)

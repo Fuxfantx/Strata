@@ -14,6 +14,11 @@ justifies it, and where it is. Numbers are from `ADRENO.md` on this machine.
    `ggml_vk_get_mul_mat_mat_f16acc` return true there. Measured: 27B pp512 77.5 -> 163.9 tok/s, 35B-A3B 148.6 -> 198.9 (and
    598 with flash attention), with identical CPU-vs-Vulkan token streams.
 
+   > **Withdrawn (2026-11-18).** "Identical token streams" was a 32-token comparison and it is false: the kernel's logits
+   > correlate 0.02 with the CPU backend's and the top token changes (`PERFORMANCE.md` §4.1). The engine no longer enables
+   > it by default. The capability-detection patch itself is still right - it is what makes the f32-accumulate cooperative
+   > matrix reachable, which is the default path today.
+
 2. **Pipeline-map lookup falls back to the `f16acc` key.** With the capability above, a plain request finds nothing because
    only `*_f16acc` variants exist; the lookup retries with `f16acc = true` and warns nothing. (`GGML_ASSERT(mmp_map !=
    nullptr)` is what it replaces.)
@@ -183,5 +188,5 @@ into one pipe and reading that single stream removes the deadlock; keep the diag
    window.  `STRATA_VK_SUBMITS=N`, which caps how many command buffers a graph is split into, confirms it: 1, 4 and 26
    submissions all give the same throughput.  With `GGML_VK_SERIALIZE_SUBMISSIONS=1` a Q2_0 token falls from 15.5 to
    9.5 tok/s, which exposes about 40 ms of GPU work against roughly 25 ms of process CPU, so a token is 40 ms of GPU
-   plus 25 ms of CPU, partially overlapped.  `port/docs/BRAINSTORM-6.md` section 0.7 records the correction; the knobs
+   plus 25 ms of CPU, partially overlapped.  `port/docs/PERFORMANCE.md` §6 records the correction; the knobs
    stay because proving what is not the bottleneck is worth an environment variable.

@@ -27,10 +27,9 @@ The measured state, the gates and the pitfalls are in [`docs/README.md`](docs/RE
 | `probe/mm-probe.cpp` | The kernel instrument: per-shape matvec/mat-mat timing, device-to-host handoff |
 | `docs/README.md` | The port as it stands: layout, build, measured numbers, where to look next |
 | `docs/ADRENO.md` | The Adreno hardware bounds, the tuning defaults and why, the trellis tile result |
-| `docs/HYBRID.md` | Where the CPU, GPU and NPU end up, what a decode token is made of, and what was measured against it |
-| `docs/NPU-FEASIBILITY.md` | The Hexagon path: how the host half is built, what it is worth, and its hazards |
-| `docs/VANILLA-REBASE.md` | How the vanilla base is composed and the procedure to swap it again |
-| `docs/OVERLAY-VANILLA.md` | The overlay, file by file |
+| `docs/features/HYBRID.md` | Where the CPU, GPU and NPU end up, what a decode token is made of, and what was measured against it |
+| `docs/features/NPU-FEASIBILITY.md` | The Hexagon path: how the host half is built, what it is worth, and its hazards |
+| `docs/features/NPU-ASSETS.md` | What is actually on this machine for the NPU and for GPU capture: the SDKs, the QNN runtime, the skels, and why the x86 RenderDoc cannot attach to an ARM64 process |
 
 ## Build
 
@@ -63,21 +62,27 @@ $model = "C:\Users\Fuxfantx\C-Res\Qwen\3.6-35A3\Qwen3.6-35B-A3B-Q4_0.gguf"
 sends; `--help` lists everything, including the NPU (`--npu`, `--npu-layers`, `--npu-mtp`, `--npu-probe`), drafting
 (`--lookup`, `--mtp`) and backend (`--gpu`) flags. The protocol is the one `tests/serve_contract.mjs` checks.
 
-## Measured (this machine, engine defaults)
+## Measured (this machine, the shipped default: correct kernels)
 
 | workload | prefill | decode |
 | --- | --- | --- |
-| tiny-qwen (dense 0.6B) | 4 301 tok/s (512) | 126.5 tok/s (64) |
-| 27B Q4_0 dense | 163.9 tok/s (512) | 7.30 tok/s (16) |
-| 35B-A3B (`qwen35moe`) | 198.9 tok/s (512) | 38.96 tok/s (32) |
-| Gyro-M (62 GB trellis MoE) | 65.3 tok/s (430) | 3.90 tok/s (24) |
-| GSQ-RCO `Q2_0` pack (67 GB) | 31.9 tok/s (64) | 13.20 tok/s (32) |
+| tiny-qwen (dense 0.6B) | 2 826 tok/s (512) | 118.9 tok/s (64) |
+| 27B Q4_0 dense | 77.9 tok/s (512) | 7.0 tok/s (16) |
+| 35B-A3B (`qwen35moe`) | 151.7 tok/s (512) | 37.8 tok/s (32) |
+| Gyro-M (62 GB trellis MoE) | 17.4 tok/s (430) | 3.3 tok/s (24) |
+| GSQ-RCO `Q2_0` pack (67 GB) | ~9 tok/s (64) | 12.4 tok/s (32) |
+| Gyro-S (54.5 GB `qwen4exp` trellis) | 19.3 tok/s (512) | 10.7 tok/s (16) |
 
-These are the defaults, which use the f16-accumulate cooperative matrix (see `ADRENO.md`); the same commands without that
-path measured 2 826 / 118.9, 77.9 / 7.0, 151.7 / 37.8, 17.4 / 3.3 and ~9 / 12.4. `STRATA_VK_F16ACC=0` restores the older
-path for any model. `PORT-STATE.md` carries the method, the gate list and the interleaved A/B results behind each engine
-change. One note about Gyro-M: it is 62 GB on a 47.6 GB machine, so its decode pages part of the active expert rows in from
-disk - earlier notes quote 3.3 tok/s for that reason, and 3.90 is what this tree measures now.
+The first five rows were measured earlier on this tree with the f16-accumulate path turned off; the Gyro-S row is the
+current default build (2026-11-18). The same commands **with** that path measured 4 301 / 126.5, 163.9 / 7.30,
+198.9 / 38.96, 65.3 / 3.90 and 31.9 / 13.20 - and those numbers are withdrawn: the kernel returns a different
+distribution (logits correlate 0.02 with the CPU backend, `docs/PERFORMANCE.md` §4.1), so its throughput was the cost
+of not doing the whole job. `STRATA_VK_F16ACC=1` still selects it for shape-only benchmarks. For prefill-heavy work use
+`--shader-family fp32`: the same family whose 16-token stream matched the CPU's token for token, at 46.6 tok/s against
+19.3 (`STRATA_VK_F16=off` is the equivalent without touching the command line).
+`docs/PERFORMANCE.md` and `docs/USAGE.md` carry the method, the gate list and the current numbers.
+One note about Gyro-M: it is 62 GB on a 47.6 GB machine, so its decode pages part of the active expert rows in from
+disk - earlier notes quote 3.3 tok/s for that reason, and this tree measures the same.
 
 ## What works, what does not
 
@@ -89,17 +94,18 @@ disk - earlier notes quote 3.3 tok/s for that reason, and 3.90 is what this tree
 - **Qwen3.8-Flash-Next** (qwen4exp): the Gyro-M trellis pack and the ISTA **GSQ-RCO** `Q2_0` pack both run on Vulkan
   with output identical to the CPU backend. GSQ-RCO is a quantisation method over standard GGUF types, not a rotation
   (the two packs carry the same 1223 tensor names); what broke them was a shader bug in the port's `q8_0` float matvec,
-  which decoded the quant bytes as unsigned and is fixed in `dequant_funcs.glsl` (`PORT-STATE.md` has the entry). The Q2
+  which decoded the quant bytes as unsigned and is fixed in `dequant_funcs.glsl` (`docs/PERFORMANCE.md` has the entry). The Q2
   pack now prefills at 31.9 tok/s and decodes at 13.20; its `q2_0` tensors need the fp16 shaders with the integer dot
   product off, which the engine selects from the pack's header.
 - **DeepSeek-V4.1**: not supported by this component, and the engine says so (`ERR ...` on the serve line). Strata's
   DeepSeek engine is a separate CUDA/HIP program.
 - **Pictures**: the engine reads text only; the app's image path needs Strata's `strata-vision` encoder.
-- **NPU**: the Hexagon backend builds from this tree and, with the vendor-signed ops library staged by
-  `port/tools/fetch-signed-htp.ps1`, `--npu dense` completes - the old DSP hang is gone and `GGML_HEXAGON_RT_REPACK=1` now
-  returns a clean `NO-SUPPORT`. Every placement measured is still slower than the GPU on this machine (27B decode 4.1-4.7
-  against 7.3 tok/s, 35B-A3B 10-14 against 39), so the engine reports the device and leaves it unused unless
-  `STRATA_VK_NPU_FORCE=1`. `NPU-FEASIBILITY.md` has the measurements and the signing wall.
+- **NPU**: the Hexagon backend builds from this tree, but no DSP session opens on this driver:
+  `remote_handle64_open` returns `AEE_ERPC` (0x200) for every module name tried (`--npu-probe`,
+  `port/tools/htp_open_probe.py`), and the earlier state in which a session did open measured every placement slower
+  than the GPU (27B decode 4.1-4.7 against 7.3 tok/s, 35B-A3B 10-14 against 39). The engine reports the device and leaves
+  it unused. `features/NPU-FEASIBILITY.md` has the measurements and the signing wall; reviving the NPU needs a QNN
+  backend, not a fixed URI.
 - **Desktop app**: built for ARM64; the engine travels inside the installer and is installed on first start.
 
 ## Integration with the desktop app, verified rather than assumed

@@ -89,7 +89,8 @@ bool Mtp::load(const std::string & path, llama_context * target_ctx, int n_ctx, 
     llama_sampler_chain_params sp = llama_sampler_chain_default_params();
     sp.no_perf = true;
     smpl_ = llama_sampler_chain_init(sp);
-    llama_sampler_chain_add(smpl_, llama_sampler_init_top_k(10));
+    // Greedy takes the global maximum, which is inside any top-k by construction: the top_k pass over the whole vocabulary
+    // could not change a token, so it is not built.
     llama_sampler_chain_add(smpl_, llama_sampler_init_greedy());
 
     // llama_batch_init allocates the embeddings but not the tokens; MTP batches carry both.
@@ -145,7 +146,7 @@ bool Mtp::observe(const llama_token * toks, int n, int pos0) {
         }
         // No logits anywhere: the head's LM matmul is skipped and only the hidden state is produced, which is all this
         // pass is for.
-        for (int i = 0; i < take; ++i) batch_.logits[i] = 0;
+        // batch_set() already cleared every row's logits flag; the second pass here was redundant.
         batch_.n_tokens = take;
         last = take - 1;
         if (llama_decode(ctx_, batch_) != 0) {

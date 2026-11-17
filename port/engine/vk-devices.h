@@ -27,7 +27,7 @@ struct ModelFacts {
     // Bytes of the expert stacks (`*_exps`) against everything else: the two figures upstream's -            --
     // resident-experts decision is made from, and the ones that decide whether this pack can be held in RAM.
     size_t expert_bytes = 0;
-    size_t dense_bytes  = 0;
+    // dense_bytes was computed on every load and read by nobody: the two facts that drive a decision are the ones around it.
     // Tensors that live on disk and are read per token rather than held in RAM: the N-Gram / PLE table of the 3.8 Flash Next
     // packs (`per_layer_token_embd`).  Subtracting them is what makes "does this pack fit" the right question.
     size_t disk_bytes   = 0;
@@ -55,7 +55,8 @@ private:
 
 // The Adreno tuning this build runs with.  Every value is measured on the X2-90 (port/docs/ADRENO.md); the engine sets a
 // variable only when the environment does not already name it, so a user can override any of them.
-void apply_adreno_tuning(GpuBackend backend, bool dense_model, bool q20_only = false, bool lowbit_pack = false);
+void apply_adreno_tuning(GpuBackend backend, bool dense_model, bool q20_only = false, bool lowbit_pack = false,
+                         int shaders = 0);
 
 // true when the policy above was the one that enabled STRATA_VK_F16ACC (and the user did not), so a placement that
 // cannot live with it can turn it off without overriding an explicit request
@@ -69,6 +70,9 @@ struct AffinityPlan {
     std::vector<int> cpus;
 };
 AffinityPlan plan_affinity(int perf_cap);
+// The CPU backend's pool: the big-core class alone, because a heterogeneous pool pays its slowest core at every node's barrier.
+// `want_threads` is --threads (0 = the whole class). STRATA_CPU_MASK / STRATA_CPU_THREADS override, for measurement.
+AffinityPlan plan_cpu_affinity(int want_threads);
 
 // What the engine decided about the dense tensors: the Hexagon NPU takes them when one is present.
 struct NpuPlan {

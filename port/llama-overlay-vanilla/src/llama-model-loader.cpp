@@ -584,8 +584,7 @@ llama_model_loader::llama_model_loader(
         bool load_mtp,
         const llama_model_kv_override * param_overrides_p,
         const llama_model_tensor_buft_override * param_tensor_buft_overrides_p,
-        const std::string & mtp_path,
-        const std::string & compat_path)
+        const std::string & mtp_path)
         : metadata(meta), set_tensor_data(set_tensor_data), set_tensor_data_ud(set_tensor_data_ud) {
     int trace = 0;
     if (getenv("LLAMA_TRACE")) {
@@ -914,51 +913,6 @@ llama_model_loader::llama_model_loader(
                 __func__, n_added, mtp_path.c_str(), n_skipped);
     }
 
-    // A companion pack carries requantised copies of some tensors (the dense weights, typically) in a faster type.  Each
-    // one replaces the entry the main pack provided: get_tensor_meta returns the weight's own tensor, so the model builds
-    // that tensor with the companion's type and reads its bytes from the companion file.
-    if (!compat_path.empty()) {
-        struct ggml_context * compat_ctx = NULL;
-        struct gguf_init_params compat_params = {
-            /*.no_alloc = */ true,
-            /*.ctx      = */ &compat_ctx,
-        };
-
-        compat_metadata.reset(gguf_init_from_file(compat_path.c_str(), compat_params));
-        if (compat_metadata == nullptr) {
-            LLAMA_LOG_WARN("%s: cannot open the companion pack %s; using the model's own tensors\n",
-                    __func__, compat_path.c_str());
-        } else {
-            files.emplace_back(new llama_file(compat_path.c_str(), "rb", use_direct_io));
-            contexts.emplace_back(compat_ctx);
-
-            int n_replaced = 0;
-            int n_unknown  = 0;
-            int n_mismatch = 0;
-            for (ggml_tensor * cur = ggml_get_first_tensor(compat_ctx); cur; cur = ggml_get_next_tensor(compat_ctx, cur)) {
-                const std::string tensor_name = cur->name;
-                auto it = weights_map.find(tensor_name);
-                if (it == weights_map.end()) {
-                    ++n_unknown;
-                    continue;
-                }
-                const ggml_tensor * orig = it->second.tensor;
-                if (ggml_nelements(cur) != ggml_nelements(orig)) {
-                    LLAMA_LOG_WARN("%s: companion tensor %s has %lld elements, the model's has %lld; keeping the model's\n",
-                            __func__, tensor_name.c_str(), (long long) ggml_nelements(cur), (long long) ggml_nelements(orig));
-                    ++n_mismatch;
-                    continue;
-                }
-                it->second = llama_tensor_weight(files.back().get(), (uint16_t) (files.size() - 1),
-                                                 compat_metadata.get(), cur);
-                ++n_replaced;
-            }
-
-            LLAMA_LOG_INFO("%s: companion pack %s replaced %d tensor(s) (%d not in the model, %d shape mismatches)\n",
-                    __func__, compat_path.c_str(), n_replaced, n_unknown, n_mismatch);
-        }
-    }
-
     n_kv      = gguf_get_n_kv(metadata);
     n_tensors = weights_map.size();
 
@@ -1080,6 +1034,50 @@ llama_model_loader::llama_model_loader(
     this->check_tensors = check_tensors;
     this->no_alloc = no_alloc;
     this->load_mtp = load_mtp;
+
+    // STRATA_EXPERTS_Q8: replace some of the pack's tensors with a side-car GGUF's (port/docs/PERFORMANCE.md section 18).  Set
+    // here rather than through llama_model_params so that the whole change stays inside the overlay: the tensor type has to be
+    // known when create_tensor() runs, and the data offset has to point into a file init_mappings() will map.
+    if (const char * sidecar = std::getenv("STRATA_EXPERTS_Q8")) {
+        if (sidecar[0] != '\0') {
+            apply_sidecar(sidecar);
+        }
+    }
+}
+
+void llama_model_loader::apply_sidecar(const std::string & path) {
+    ggml_context * sctx = nullptr;
+    gguf_init_params gp = { /*.no_alloc =*/ true, /*.ctx =*/ &sctx };
+    gguf_context * sgguf = gguf_init_from_file(path.c_str(), gp);
+    if (sgguf == nullptr || sctx == nullptr) {
+        throw std::runtime_error(format("%s: cannot read the side-car %s", __func__, path.c_str()));
+    }
+    const int64_t n = gguf_get_n_tensors(sgguf);
+    const size_t data_off = gguf_get_data_offset(sgguf);
+    // the side-car is one more file: init_mappings() maps it like the pack's own, so a weight that points at it needs no new path
+    files.emplace_back(new llama_file(path.c_str(), "rb", use_direct_io));
+    const uint16_t idx = (uint16_t) (files.size() - 1);
+    size_t used = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        const char * name = gguf_get_tensor_name(sgguf, i);
+        const auto * w = get_weight(name);
+        if (w == nullptr) {
+            LLAMA_LOG_WARN("%s: side-car tensor %s is not in the model; ignored\n", __func__, name);
+            continue;
+        }
+        const ggml_type type = gguf_get_tensor_type(sgguf, i);
+        auto & weight = const_cast<llama_tensor_weight &>(*w);
+        weight.idx  = idx;
+        weight.offs = data_off + gguf_get_tensor_offset(sgguf, i);
+        sidecar_type.emplace(name, type);
+        used++;
+    }
+    gguf_free(sgguf);
+    ggml_free(sctx);
+    LLAMA_LOG_INFO("%s: %zu tensors come from the side-car %s\n", __func__, used, path.c_str());
+    if (used == 0) {
+        throw std::runtime_error(format("%s: the side-car %s shares no tensor with the model", __func__, path.c_str()));
+    }
 }
 
 std::string llama_model_loader::get_arch_name() const {
@@ -1611,6 +1609,20 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         }
     }
 
+    // A side-car tensor has a different type from the pack's (trellis -> Q8_0), so the size check below cannot hold for it.
+    if (const auto sc = sidecar_type.find(tn.str()); sc != sidecar_type.end()) {
+        t_meta.type = sc->second;
+        for (size_t dim = 0; dim < GGML_MAX_DIMS; dim++) {
+            if (dim == 0) {
+                t_meta.nb[dim] = ggml_type_size(t_meta.type);
+            } else if (dim == 1) {
+                t_meta.nb[dim] = ggml_row_size(t_meta.type, t_meta.ne[dim-1]);
+            } else {
+                t_meta.nb[dim] = t_meta.ne[dim-1]*t_meta.nb[dim-1];
+            }
+        }
+        GGML_ASSERT(cur->ne[0] == t_meta.ne[0] && cur->ne[1] == t_meta.ne[1] && cur->ne[2] == t_meta.ne[2]);
+    } else
     GGML_ASSERT(ggml_nbytes(&t_meta) == ggml_nbytes(cur));
 
     ggml_backend_buffer_type_t buft = buft_for_tensor(&t_meta);

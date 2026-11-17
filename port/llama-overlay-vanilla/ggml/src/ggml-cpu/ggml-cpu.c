@@ -1275,6 +1275,17 @@ static void ggml_compute_forward_mul_mat_one_chunk(
                 //}
 
                 for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += num_rows_per_vec_dot) {
+                    /* STRATA_CPU_PREFETCH */
+                    #if defined(__clang__) || defined(__GNUC__)
+                                // Decode's dense matvec runs this loop with a one-token batch: tiled and llamafile both bail out, and one row of
+                                // Q5_K is about 1.7 KB, so the stream is latency-bound unless the next rows are named early.
+                                if (ir0 + num_rows_per_vec_dot < ir0_end) {
+                                    const char * nxt = (const char *) (src0_row + (ir0 + num_rows_per_vec_dot) * nb01);
+                                    __builtin_prefetch(nxt, 0, 1);
+                                    __builtin_prefetch(nxt + 64, 0, 1);
+                                    __builtin_prefetch(nxt + 128, 0, 1);
+                                }
+                    #endif
                     vec_dot(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0), src0_row + ir0 * nb01, (num_rows_per_vec_dot > 1 ? nb01 : 0), src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
                 }
 
@@ -1571,6 +1582,19 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
                 float * dst_col = (float *) ((char *) dst->data + (i1*nb1 + i2*nb2));
 
                 for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ++ir0) {
+                    /* STRATA_CPU_PREFETCH */
+                    #if defined(__clang__) || defined(__GNUC__)
+                                // Decode's expert matvec is a one-token batch, so this loop runs one row at a time and an expert
+                                // row is 520 B (tqk6, k=2560) - shorter than the dense rows the same prefetch was added to, and
+                                // the loop has no row batching at all.  The dense loop has had this since the first CPU round;
+                                // the MoE loop did not.  Harmless where the hardware prefetcher already covers the stream.
+                                if (ir0 + 1 < ir0_end) {
+                                    const char * nxt = (const char *) (src0_cur + (ir0 + 1) * nb01);
+                                    __builtin_prefetch(nxt, 0, 1);
+                                    __builtin_prefetch(nxt + 64, 0, 1);
+                                    __builtin_prefetch(nxt + 128, 0, 1);
+                                }
+                    #endif
                     vec_dot(ne00, &tmp[ir0 - iir0], 0, src0_cur + ir0*nb01, 0, src1_col, 0, 1);
                 }
 
@@ -1782,7 +1806,47 @@ static void ggml_compute_forward_mul_mat_id(
 
 /////////////////////////////////
 
+// STRATA_CPU_TIME=1: per-op wall time on the CPU backend, thread 0 only, printed at exit.  The CPU decode is 165 ms a token and
+// the split between the quantised matvecs, the custom ops and the elementwise work is what decides what to rewrite first.
+static uint64_t g_cpu_time_us[GGML_OP_COUNT];
+static uint64_t g_cpu_time_n[GGML_OP_COUNT];
+static int      g_cpu_time_on = -1;
+
+static void strata_cpu_time_report(void) {
+    if (g_cpu_time_on != 1) {
+        return;
+    }
+    uint64_t total = 0;
+    for (int i = 0; i < GGML_OP_COUNT; ++i) {
+        total += g_cpu_time_us[i];
+    }
+    fprintf(stderr, "\n[cpu-time] total %8.1f ms\n", total / 1000.0);
+    for (int rank = 0; rank < 12; ++rank) {
+        int best = -1;
+        for (int i = 0; i < GGML_OP_COUNT; ++i) {
+            if (g_cpu_time_us[i] == 0 || (best >= 0 && g_cpu_time_us[i] <= g_cpu_time_us[best] && best != i)) {
+                if (best != i) continue;
+            }
+            if (best < 0 || g_cpu_time_us[i] > g_cpu_time_us[best]) best = i;
+        }
+        if (best < 0 || g_cpu_time_us[best] == 0) break;
+        fprintf(stderr, "[cpu-time] %8.1f ms %5.1f%% %7llu calls  %s\n",
+                g_cpu_time_us[best] / 1000.0,
+                total ? 100.0 * (double) g_cpu_time_us[best] / (double) total : 0.0,
+                (unsigned long long) g_cpu_time_n[best], ggml_op_name((enum ggml_op) best));
+        g_cpu_time_us[best] = 0;
+    }
+    fflush(stderr);
+}
+
 static void ggml_compute_forward(struct ggml_compute_params * params, struct ggml_tensor * tensor) {
+    if (g_cpu_time_on < 0) {
+        g_cpu_time_on = getenv("STRATA_CPU_TIME") != NULL ? 1 : 0;
+        if (g_cpu_time_on) {
+            atexit(strata_cpu_time_report);
+        }
+    }
+    const int64_t strata_t0 = (g_cpu_time_on && params->ith == 0) ? (int64_t) ggml_time_us() : 0;
     GGML_ASSERT(params);
 
     if (tensor->op == GGML_OP_NONE || ggml_is_empty(tensor)) {
@@ -1818,6 +1882,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
         case GGML_OP_MUL:
             {
                 ggml_compute_forward_mul(params, tensor);
+            } break;
+        case GGML_OP_GATED_MUL:
+            {
+                ggml_compute_forward_gated_mul(params, tensor);
             } break;
         case GGML_OP_DIV:
             {
@@ -2138,10 +2206,6 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_dsv4_hc_post(params, tensor);
             } break;
-        case GGML_OP_GATED_MUL:
-            {
-                ggml_compute_forward_gated_mul(params, tensor);
-            } break;
         case GGML_OP_TOP_K_MASK:
             {
                 ggml_compute_forward_top_k_mask(params, tensor);
@@ -2210,6 +2274,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 GGML_ABORT("fatal error");
             }
+    }
+    if (strata_t0 != 0) {
+        g_cpu_time_us[tensor->op] += (uint64_t) ((int64_t) ggml_time_us() - strata_t0);
+        g_cpu_time_n[tensor->op]  += 1;
     }
 }
 
@@ -2373,6 +2441,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
                     GGML_ABORT("fatal error");
             }
             break;
+        case GGML_OP_GATED_MUL:
+            {
+                n_tasks = n_threads;
+            } break;
         case GGML_OP_GLU:
             switch (ggml_get_glu_op(node)) {
                 case GGML_GLU_OP_REGLU:
@@ -2542,6 +2614,12 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
             }
         default:
             {
+                if (getenv("STRATA_CPU_DIAG") != NULL) {
+                    fprintf(stderr, "[cpu-diag] op=%d opc=%d name=%s src0=%s glu=%d\n",
+                            (int) node->op, (int) GGML_OP_GLU, ggml_op_name(node->op),
+                            node->src[0] ? node->src[0]->name : "-",
+                            node->op == GGML_OP_GLU ? (int) ggml_get_glu_op(node) : -1, GGML_MAX_SRC);
+                }
                 fprintf(stderr, "%s: op not implemented: ", __func__);
                 if (node->op < GGML_OP_COUNT) {
                     fprintf(stderr, "%s\n", ggml_op_name(node->op));

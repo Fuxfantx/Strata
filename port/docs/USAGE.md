@@ -1,0 +1,114 @@
+# 使用 / Usage
+
+## 1. 构建 / Build
+
+```powershell
+# 取一份 llama.cpp（pin 见 port/llama-overlay-vanilla/UPSTREAM.md），叠加 overlay，构建引擎与工具
+powershell -NoProfile -ExecutionPolicy Bypass -File port/tools/fetch-llama.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File port/tools/build-engine.ps1
+# 可选：后端自检工具
+powershell -NoProfile -ExecutionPolicy Bypass -File port/tools/build-engine.ps1 -Target test-backend-ops
+```
+
+产物在 `build\bin\`：`strata-vk.exe`、`llama.dll`、`ggml-vulkan.dll`、`ggml-cpu.dll`。
+The build reads `third_party/llama.cpp`; the overlay in `port/llama-overlay-vanilla` is composed into it (see `MAINTAINER.md`).
+
+## 2. 跑起来 / Run
+
+```powershell
+# 默认：整模型在 GPU（Vulkan）
+build\bin\strata-vk.exe --native D:\models\pack.gguf --tokens 9707 --n 32
+
+# 纯 CPU 后端（需要支持的自定义算子，见 BACKEND-OPTIONS.md）
+build\bin\strata-vk.exe --gpu cpu --native D:\models\pack.gguf --tokens 9707 --n 16
+```
+
+`--tokens` 是**确定的**输入路径（不走模板），用于复现与门禁；`--prompt` 的裸文本对这个模型是 off-distribution 的，
+见 `BACKEND-OPTIONS.md` §13（不要用它做门禁）。
+
+## 3. 常用开关 / Flags worth knowing
+
+| 开关 | 作用 |
+| --- | --- |
+| `--native FILE` | 模型包 |
+| `--gpu vulkan\|cpu` | 后端 |
+| `--tokens a,b,c` / `--prompt TEXT` | 输入（token 路径 / 文本路径） |
+| `-c N` / `--ctx-size` | 上下文（默认 32768） |
+| `--kv f16\|q8_0\|q4_0` | KV 类型（实测对 decode 无影响） |
+| `--shader-family auto\|f16\|fp32` | Vulkan 的 shader 家族。**这是一个真实的交换**：f16（默认）decode 10.7 / prefill pp512 19.2；fp32 decode 5.5 / prefill **46.1**。而且 fp32 家族在 35B 的 16-token 模板化 prompt 上与 CPU 后端逐 token 相同，f16 家族在第 14 个 token 上因一次并列翻转分叉（两者 logits 相关性都是 0.999，`PERFORMANCE.md` §1）。长文档、短回复用 fp32；交互式用默认 |
+| `--prefill N` | prefill 分块（默认 1024；此项带来 pp512 +25%） |
+| `--npu off\|dense\|split` | NPU 布置（本机被守卫硬关闭，见 BACKEND-OPTIONS.md） |
+| `--perf-cap 1..100` | 限速（默认 100）；`--gpu cpu` 时不生效，见下面的 `-t` |
+| `-t N` / `--threads N` | 后端线程数。`--gpu cpu` 的默认是**大核类的核数减一**（本机 11，逻辑 CPU 6-17 里留一个给宿主）：小核在每个算子的屏障上都在收钱，而占满整类会让主线程/驱动/OS 抢核（`PERFORMANCE.md` §3）。`-t` 超过大核数会**主动把掩码放宽到全部核**，所以 `--gpu cpu -t 18 --bench-pp` 能拿回 CPU prefill 的 19.4 tok/s |
+| `--lookup on\|off` | 投机解码（实测 0% 接受率，见 PERFORMANCE.md） |
+
+## 4. 测量 / Measuring
+
+| 工具 | 用途 |
+| --- | --- |
+| `STRATA_VK_TIME=1` | GPU 侧时间桶（record/submit/wait/dispatch/barrier/fusion/end） |
+| `STRATA_VK_NODE_LOG=1` / `STRATA_VK_PIPE_LOG=1` | 逐节点 / 逐 pipeline 的 dispatch 记录 |
+| `STRATA_CPU_TIME=1` | CPU 后端逐算子计时（退出时按算子名打印） |
+| `STRATA_VK_OP_TIME=1` | 逐 dispatch 的 GPU 时间戳（**行级金额不可信**，见 PERFORMANCE.md） |
+| `GGML_VK_PERF_LOGGER=1` | 每图 GPU `Total time`（**这个可信**） |
+| `python port/tools/ab_pp.py` | ABBA 成对 A/B（含 `--control` 零对照） |
+| `python port/tools/op-times.py` | 解析 perf-logger 输出 |
+| `python port/tools/node-count.py` | 逐算子 dispatch 计数 |
+| `python port/tools/logit-diff.py` | 两次 `--dump-logits` 的质量对比（top-1/top-k/KL） |
+| `--batch-slots N` + `--bench-tg T` | **批量解码基准**：N 条序列各走 T 步，每步一个 batch。`N = 1` 与 `N > 1` 是同一段代码，所以两个数是一对成对比较。`slots >= 9` 才会进 matmul 路径（8 及以下走慢的 matvec，8 是个坑）；32 槽曾按 40.2 tok/s 记录，那个数来自坏内核（`PERFORMANCE.md` §4）。要求 `n_seq_max >= N`（即同一个 `--batch-slots` 会同时设 `cp.n_seq_max`）以及 `n_ctx >= N × (prompt + T + 1)`，每条序列分到的上下文是 `n_ctx / N` |
+| `python port/tools/energy-ab.py EXE MODEL -- <引擎参数> + <引擎参数>` | **成对能耗**：一边跑引擎一边用 `energy-sample.ps1` 采样 Energy Meter，把样本裁到引擎自己打印的 `bench window`（只含被计时的解码步），报每 1000 token 的能耗。计数器是未标定标度，**只有同一次探针内的比值有效**；两次运行要生成相同的 token 数 |
+| `--parallel N` / `--batch N` | **`--serve` 的请求槽数**（`--batch` 是 `serve/replicas.py` 的写法）。N ≥ 2 时 `INFO` 报 `batch_slots=N`，引擎接受 `BGEN <slot> …` 并把 N 个请求放进同一批、每步各出一个 token，**一份权重**。每槽的 cache 是 `n_ctx / N`。**正确但当前没有收益**：32 槽、每请求 64 token 实测槽 0 与 solo **64/64 相同**，但每步 3178 ms ≈ 32 × 单条 99 ms，聚合 **1.00×**（`PERFORMANCE.md` §4；早先的 4.27× 是坏内核的读数，已撤回） |
+| `python port/tools/batch-serve.py EXE MODEL --slots N --tokens T --engine …` | **协议级批量**：同一进程先发一个 `GEN` 再发 N 个 `BGEN`，按同槽相邻 token 的时间差报每步时间（不含 prefill），并核对槽 0 的 token 流与单独运行是否逐 token 相同 |
+| `python port/tools/gguf-budget.py MODEL.gguf` | 一个包的字节预算：按角色、按类型、按张量，带宽论证都用它（只读元数据，60 GB 的包也是秒级） |
+| `python port/tools/gguf-tokenizer.py MODEL.gguf --out pack/full/tokenizer` | 从包里造出 `serve/server.py` 要的 tokenizer 目录（`vocab.json`/`merges.txt`/`token_type.json`/`tokenizer.json`），并用 `tools/strata_tokenizer.py` 本体做往返验证。**tokenizer 必须来自被服务的那个模型**；`strata_tokenizer` 只认 `qwen35` / `deepseek*` 两种 pre-tokenizer，`qwen2`（Tiny-Qwen）会被明确拒绝 |
+| `python port/tools/e2e-replicas.py --exe build/bin/strata-vk.exe --model M.gguf --out-json tmp.json` | 并发那条线的端到端：起一个 server、两个副本（Vulkan + CPU）、并发两个请求，断言双方完成且日志里有 `cards 0 \| cpu` |
+| `python port/tools/two-serve.py` | 两个引擎（默认 + `--gpu cpu`）各发一个 GEN，断言各自的 READY/后端/`DONE` token 数（不经过 Python server） |
+| `STRATA_CPU_REPACK=0\|1` | 压过引擎按内存预算给 repack 的判断；`0` 复现"repack 从未生效"的旧行为，用来做 A/B |
+| `STRATA_CPU_MASK=<hex>` / `STRATA_CPU_THREADS=N` | 压过 CPU 后端的大核类亲和计划（`plan_cpu_affinity`），用来扫掩码/线程数 |
+| `STRATA_VK_SKIP=<子串>` | **测量用消融**：pipeline 名含该子串的 dispatch 照常记账但不发射，输出必然是错的，墙钟就是这一族的价格。一次构建问"这一族要多少钱"，比抓帧便宜（`PERFORMANCE.md` §2 与 `ADRENO.md` 是它的第一份结果）。**结果比基线更慢 = 垃圾数据，不是这一族便宜** |
+| `STRATA_VK_ADMIT_DEBUG=1` | 在准入处与 solo 首 token 处打印采样行的 top-1/top-2 和两个索引（`n-1` 与 `-1`）各自解析到的行；用它区分"行是空的 / 行号映射错 / 模型真的选了别的"。“第二个请求不一样”那条就是靠它定位的（`PERFORMANCE.md` §4） |
+| `STRATA_VK_KV_UNIFIED=1` | 把 `kv_unified` 打开（`llama_context_default_params` 默认是 false，而 llama.cpp 自己的工具都走 `common_params` 的 true）。实测：单序列 logits 回到 n_seq_max=1 的值，但第二个序列直接 NaN，**是负结果**，留在代码里是为了下次不用重写（`PERFORMANCE.md` §4） |
+| **只换 `build\bin\ggml-cpu.dll` 做 A/B** | 内核级 A/B 最干净的办法：把两个变体各存一份 DLL，每跑一次换一次文件。它把"重新构建"从测量里去掉，成对交替之后噪声底比换源码重编小得多（本轮的 trellis 融合就是用这个办法判成中性的） |
+| **跑 app / JS 侧的测试** | 这台机器的 PATH 上没有 `node`，但 DSH 自己跑在 Node 上：`$env:ELECTRON_RUN_AS_NODE='1'; & "$env:LOCALAPPDATA\Programs\DeepSeek Harness\DeepSeek Harness.exe" --version` 报 **Node v24**，`-e "..."` 可直接执行脚本。`apps/host` 的 `.mjs` 与 `serve/` 的 Python 测试因此都能在本机跑，不必等打包 |
+| `serve/server.py --replicas-cpu N` | 在卡片副本旁边再加 N 个 **CPU 后端**副本（一张卡的机器唯一能有的第二个 worker）。实测 +39% 聚合（`PERFORMANCE.md` §4），代价是超大包上第二个请求慢。端到端验证脚本：`python port/tools/e2e-replicas.py --exe build\bin\strata-vk.exe --model M.gguf --tokenizer T --out-json X --cpu-via-cli` |
+| `python port/tools/gguf-tokenizer.py M.gguf --out DIR` | 从包元数据造出 `serve/server.py` 要的 tokenizer 目录，并用 `strata_tokenizer` 做编码往返验证。**vocab 必须来自被服务的那个模型**；`pre` 只支持 `qwen35` / `deepseek*` |
+| `python port/tools/two-serve.py EXE MODEL` | 按 `serve/replicas.py` 的写法同时起两个引擎（一个默认后端、一个 `--gpu cpu`），各发一个 GEN，断言两侧都 READY、都 DONE、token 数对得上。这是「CPU 副本」那条路的引擎侧契约检查（`PERFORMANCE.md` §4） |
+| `STRATA_VK_F16ACC=1` | 选 f16-accumulate 的 cooperative matrix。**默认已关闭**：它与 CPU logits 的相关性只有 0.02（27B/35B/Gyro-S 三个包都测了），输出是错的；打开只用于"只看形状"的基准（prefill 221 tok/s 那种读数就是它，`PERFORMANCE.md` §4.1） |
+| `STRATA_VK_F16=off` | 强制 fp32 shaders。**正确**且 prefill 快一倍（Gyro-S pp512 19.33 → 46.63 tok/s），代价是 decode 掉到一半（10.68 → 5.48 tok/s）：适合"长 prompt、短回复"，默认仍按模型自动选。同义的正式开关是 `--shader-family fp32` |
+| `STRATA_VK_INT8_COOPMAT=1` | 让 Qualcomm 设备也创建 upstream 只给 AMD RDNA3/4 建的 **int8 cooperative MMQ** 管线（本机硬件有 64×64×32 的 Sint8→Sint32 矩阵核心，**int32 累加、精确**）。实测：oracle 在 q5_K/q6_K/q8_0 上 **0 失败**，但 Gyro-S pp512 16.18 → 15.62、tg16 10.37 → 10.31 —— **中性**，默认关（`PERFORMANCE.md` §4.2 与 §5-P3） |
+| `--dump-logits FILE` | 把第一次生成的首行 logits 写盘（fp32 词表长度）。与 `--gpu cpu` 配对就是后端等价性门禁（`USAGE.md` 第 5 节第 0 条，`PERFORMANCE.md` §4.1） |
+
+## 5. 门禁 / Gates
+
+交付前跑一次，全部通过才提交：
+
+```powershell
+# 0) 后端等价性：同一模型、同一模板化 prompt，CPU 与 Vulkan 各存一份 logits，比相关性与 argmax
+#    （token 流比较会漏掉整类错误：f16-accumulate 的 coopmat 内核就是在 32-token 比较下活了很久，见 §4.1）
+build\bin\strata-vk.exe --native M.gguf --tokens 248045,846,198,9419,248046,198,248045,74455,198 --n 1 --gpu cpu --dump-logits tmp-cpu.bin
+build\bin\strata-vk.exe --native M.gguf --tokens 248045,846,198,9419,248046,198,248045,74455,198 --n 1 --dump-logits tmp-gpu.bin
+#    期望：corr >= 0.999 且 argmax 相同；实测 27B 0.99967、35B 0.99906、Gyro-S 首 token 与 CPU 相同
+#    （模板化 prompt 的 id 用 tools/strata_tokenizer.py 的 Tokenizer.from_gguf(...).encode(tmpl, parse_special=True) 取）
+
+# 1) 参考 token 流（GPU 路径必须逐 token 相同）
+build\bin\strata-vk.exe --native D:\models\pack.gguf --tokens 9707 --n 32
+#    期望：16451,18,13,20,12,21135,487,328,31788,24894,8015,19,9546,487,328,74,24050,12283,17,13,20,487,328,40819,12,20,1293,198,262,28539,283,498
+
+# 2) 后端 oracle
+build\bin\test-backend-ops.exe -o MUL_MAT -b Vulkan0     # 期望 0 failures
+#    注意：它只覆盖默认管线；STRATA_VK_F16ACC=1 那条内核不进 oracle，所以第 0 条是它的唯一门禁
+
+# 3) 文档与编码
+python port/tools/check-encoding.py        # 期望 0 damaged
+python port/tools/audit-docs.py            # 期望 0 problems
+
+# 4) overlay 与 third_party 一致
+python - <<'PY'
+import hashlib, pathlib
+r = pathlib.Path('port/llama-overlay-vanilla'); t = pathlib.Path('third_party/llama.cpp')
+files = [p for p in r.rglob('*') if p.is_file()]
+mis = [str(p.relative_to(r)) for p in files if not (t/p.relative_to(r)).exists()
+       or hashlib.sha256(p.read_bytes()).hexdigest() != hashlib.sha256((t/p.relative_to(r)).read_bytes()).hexdigest()]
+print('overlay', len(files), 'files', len(mis), 'mismatches')
+PY
+```

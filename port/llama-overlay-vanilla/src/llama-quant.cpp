@@ -1054,7 +1054,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
     const llama_model_kv_override * kv_overrides = params->kv_overrides;
     std::vector<std::string> splits = {};
     llama_model_loader ml(/*metadata*/ nullptr, /*set_tensor_data*/ nullptr, /*set_tensor_data_ud*/ nullptr,
-        fname_inp, splits, /*file*/ nullptr, /*load_mode*/ load_mode, /*check_tensors*/ true, /*no_alloc*/ false, /*load_mtp*/ true, kv_overrides, nullptr, /*mtp_path*/ "", /*compat_path*/ "");
+        fname_inp, splits, /*file*/ nullptr, /*load_mode*/ load_mode, /*check_tensors*/ true, /*no_alloc*/ false, /*load_mtp*/ true, kv_overrides, nullptr, /*mtp_path*/ "");
     ml.init_mappings(false); // no prefetching
 
     auto mparams = llama_model_default_params();
@@ -1148,12 +1148,6 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
         if (remapped_name != it.first) {
             ggml_set_name(it.second.tensor, remapped_name.c_str());
             LLAMA_LOG_DEBUG("%s: tensor %s remapped to %s\n", __func__, it.first.c_str(), ggml_get_name(it.second.tensor));
-        }
-        if (params->only_tensors != nullptr && params->only_tensors[0] != '\0') {
-            static const std::regex only_re(params->only_tensors);
-            if (!std::regex_search(it.first, only_re)) {
-                continue;
-            }
         }
         tensors.push_back(&it.second);
     }
@@ -1504,8 +1498,7 @@ llama_model_quantize_params llama_model_quantize_default_params() {
         /*.kv_overrides                =*/ nullptr,
         /*.tensor_type                 =*/ nullptr,
         /*.prune_layers                =*/ nullptr,
-        /*.max_buf_size                =*/ LLAMA_QUANT_MAX_BUF_SIZE,
-        /*.only_tensors                =*/ nullptr
+        /*.max_buf_size                =*/ LLAMA_QUANT_MAX_BUF_SIZE
     };
 
     return result;

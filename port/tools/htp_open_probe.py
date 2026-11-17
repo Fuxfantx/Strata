@@ -17,8 +17,9 @@ import ctypes
 import os
 import sys
 
-DLL = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                   "build", "bin", "ggml-hexagon.dll")
+DLL = os.environ.get("HTP_PROBE_DLL") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "build", "bin", "ggml-hexagon.dll")
 
 SUFFIX = "?htp_iface_skel_handle_invoke&_modver=1.0"
 
@@ -34,6 +35,11 @@ def main(argv: list[str]) -> int:
     if not os.path.isfile(DLL):
         print(f"missing {DLL}")
         return 2
+
+    # Point dependent-DLL resolution at the library's own directory, so the vendor
+    # ggml-hexagon.dll can be probed beside its own ggml-base.dll.
+    if hasattr(os, "add_dll_directory"):
+        os.add_dll_directory(os.path.dirname(DLL))
 
     lib = ctypes.CDLL(DLL)
     lib.htpdrv_init.restype = ctypes.c_int
@@ -90,6 +96,34 @@ def main(argv: list[str]) -> int:
     for other in ("v73", "v75", "v79", "v85"):
         if f"libggml-htp-{other}.so" in present:
             attempt(f"arch {other}", f"file:///{fwd}/libggml-htp-{other}.so{SUFFIX}&_dom=cdsp&_session=0")
+
+    # Modules the driver already allow-lists, mapped to \cdsp\<name> in
+    # HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\VEN_QCOM&DEV_0FF0...\Device Parameters\Mappings\CDSP\Default.
+    # If these open and ours do not, the allow-list is the only gap.
+    for known in ("version.so", "libbenchmark_skel.so", "example_image.so"):
+        attempt(f"allow-listed {known}", f"file:///{known}{SUFFIX}&_dom=cdsp&_session=0")
+
+    # A name that is in no allow-list at all. If this returns the same code as a mapped
+    # module, the code does not describe the module and the failure is earlier.
+    attempt("unmapped name", f"file:///no-such-module.so{SUFFIX}&_dom=cdsp&_session=0")
+
+    # The sweep below can block inside a driver call, where no Python timeout can reach it,
+    # so it only runs on request. One variant per run, in its own process:
+    #   HTP_PROBE_EXTRA=1 python port/tools/htp_open_probe.py build\bin
+    if not os.environ.get("HTP_PROBE_EXTRA"):
+        print("(skipping domain/session sweep; set HTP_PROBE_EXTRA=1 to run it)")
+        return 0
+
+    # The adsp device carries ~200 shipped mappings under \adsp. If a load in that domain
+    # answers differently from every cdsp load, the cdsp process domain is what fails.
+    for dom, known in (("adsp", "libsns_device_mode_skel.so"),
+                       ("adsp", "libsysmonquery_skel.so"),
+                       ("cdsp", "version.so")):
+        attempt(f"_dom={dom} {known}", f"file:///{known}{SUFFIX}&_dom={dom}&_session=0")
+
+    # Session ids past 0, in case the first session slot is already taken on this machine.
+    for sid in (1, 2, 3):
+        attempt(f"session {sid}", f"file:///libggml-htp-{arch}.so{SUFFIX}&_dom=cdsp&_session={sid}")
 
     return 0
 

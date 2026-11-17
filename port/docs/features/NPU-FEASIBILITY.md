@@ -1,10 +1,85 @@
 # The Hexagon NPU
 
-State, this build: the HTP backend **builds and runs**, opens DSP sessions and reports the device. With the vendor-signed ops
-library staged by `port/tools/fetch-signed-htp.ps1`, `--npu dense` completes, and `GGML_HEXAGON_RT_REPACK=1` now fails cleanly
-with a `dsp-rsp NO-SUPPORT` instead of hanging the DSP. Every placement measured is still slower than the GPU on this machine
-(27B decode 4.11 head / 4.69 split4 / 0.57 dense against 7.34 tok/s on the GPU; 35B-A3B 13.9 / 10.3 / 5.22 against 37.6), so
-the NPU stays off unless `STRATA_VK_NPU_FORCE=1`.
+## State now: no session opens, and the gate is on the Windows side
+
+Measured on this machine, this build: `remote_handle64_open` returns **`AEE_ERPC` (0x200)** for **every** module
+name tried, so no DSP session opens at all and the NPU contributes nothing. `mm-probe`, `test-backend-ops -b HTP0`
+and `port/tools/htp_open_probe.py` all fail at the same call, in about a second, with no model loaded. This replaces
+the earlier claim that sessions open; whatever the state was when that was written, it is not the state now.
+
+| what | result |
+| --- | --- |
+| `htpdrv_init` (loads `libcdsprpc.dll` from the `qcnspmcdm` driver store) | `AEE_SUCCESS` |
+| `DSPRPC_CONTROL_UNSIGNED_MODULE` (enable unsigned PD) | `AEE_SUCCESS` |
+| `DSPRPC_GET_DSP_INFO` (`htpdrv_get_arch`) | `AEE_SUCCESS`, arch **v81**, DMA64 enabled |
+| `FASTRPC_GET_URI` | not acknowledged: the engine falls back to its own `&_dom=..&_session=..` URI |
+| `FASTRPC_GET_DOMAINS` | `0x6c` `AEE_EUNSUPPORTEDAPI` -> static domain table, `domain_id` 3, name `cdsp` |
+| `FASTRPC_MANAGE_DSP_LIBRARY_PATH` | `0x14` `AEE_EUNSUPPORTED` -> the DSP search path cannot be set on this driver |
+| `remote_handle64_open`, our skel, 5 arches, 5 URI forms | `0x200` `AEE_ERPC` every time |
+| `remote_handle64_open`, our skel, **no** `&_dom`/`&_session` | `0x0e` `AEE_EBADPARM` |
+| `remote_handle64_open`, an **unmapped** module name | `0x200`, the same as a mapped one |
+| `remote_handle64_open`, vendor `ggml-hexagon.dll` (459776 bytes) through the same probe | `0x200` and `0x0e` in exactly the same places |
+
+So the URI is parsed and the domain suffix is mandatory, and the host RPC then fails in a way that does not depend on
+which module was asked for. The driver can talk to the CDSP (the arch query answers) but cannot start a load in it.
+No provider writes an event for it: the `System` and `Application` logs hold nothing from
+`qcnspmcdm`/`qcadsprpc` in the window of a probe run.
+
+## The module allow-list exists, and is not the gate
+
+The NSP-MCDM driver keeps a per-device allow-list of DSP modules:
+
+```
+HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\VEN_QCOM&DEV_0FF0&SUBSYS_CRD08480&REV_0056\2&daba3ff&0
+    Device Parameters\Mappings\CDSP\Default\KEY
+        Local  = host path of the .so
+        remote = device path, e.g. \cdsp\version.so
+```
+
+`KEY` is **sha256 of the device path in UTF-8, lower case hex** - not a hash of the file. Checked against the
+four shipped entries `version.so`, `libUbwcD.so`, `libbenchmark_skel.so` and `libsysmonquery_skel.so`:
+4 of 4 match (`port/tools/htp-hash-probe.py`). The set name is `Default`; the separate ADSP device carries
+`PathMappingKeyName = DefaultV1` but has no entries, so it is not the set in use.
+
+Seventeen CDSP entries exist (`version.so`, `libc++*.so.1`, `fastrpc_shell_3`, `fastrpc_shell_unsigned_3`,
+`libbenchmark_skel.so`, `libloadalgo_skel.so`, the `libsysmon*` skels, `example_image*.so`, `libUbwcD.so`,
+`libhcpfrc.so`, `libcrm_test_skel.so`). **Our `libggml-htp-v81.so` is not among them**, nor are v73/v75/v79/v85.
+
+The allow-list was the leading explanation for `0x200`. It is now **refuted by measurement**:
+
+1. The entry for `libggml-htp-v81.so` was written from an elevated prompt (key
+   `57fffee76930ada46b4d9aff91a740a382def915a782465d70193fac0f6fb602`, `Local` and `remote` as above, confirmed with
+   `htp-register-module.ps1 -Verify`), and the open still returns `0x200` for all five URI forms.
+2. A name that is in **no** allow-list (`no-such-module.so`) returns `0x200` as well. An error that cannot tell a
+   registered module from an unregistered one does not describe module resolution at all.
+3. Qualcomm's own host library from the GenieX package, probed beside its own `ggml-base.dll`, returns `0x200` and
+   `0x0e` in exactly the same places, so this is not a defect in this port either.
+
+That leaves the process domain. A FastRPC open has to create a user PD in the named domain before it can load a
+module, and `_dom=cdsp` fails there, which is why the code is the same for every name. The installed driver is
+`30.0.228.10000` (built 2026/08/21, installed 2026/11/08), newer than the GenieX v0.11.0 package whose catalog was
+signed 2026/05/14, so the platform is a plausible place for a regression to have happened - an inference from
+versions, not a measurement.
+
+The other installed FastRPC library is not a way around it: `qcadsprpc8480...\libcdsprpc.dll` (the adsp stack) also
+accepts `DSPRPC_CONTROL_UNSIGNED_MODULE` and also refuses the open, with `0x72` instead of `0x200`
+(`port/tools/htp-driver-variant-probe.py`).
+
+What this means: **raw FastRPC to the CDSP/HTP is not usable on this Windows platform, so this HTP backend cannot run
+here at all.** The only stack the driver still advertises for the NPU is the QNN user-mode one in the `\htp` mapping
+set (`HtpUsrDrv.dll`, `QnnHtpV81StubDrv.dll`, `libQnnHtpV81SkelDrv.so`). That is a different host API, not a
+different URI, so reaching the NPU would mean writing a QNN backend rather than repairing this one.
+
+The registered entry is inert; `htp-register-module.ps1 -Remove` takes it back out of the device key.
+
+The vendor package registers nothing either: `geniex-sdk-windows-arm64-v0.11.0.zip` ships `libggml-htp.inf` with
+`CopyFiles` only and **no** `AddReg`. The `libggml-htp.cat` beside it is genuinely Microsoft-signed (WHCP, valid),
+and the five skels and the catalog in `build\bin` are byte-identical to that package.
+
+## Earlier record
+
+The paragraphs below were measured when sessions did open, and are kept as the record of what the NPU path was worth
+then. Their numbers are not current: without a session none of them can be reproduced.
 
 The rest of this note records the investigation that got there, including the hang it started from: with the older skels the
 first packet of a **runtime-repacked (tiled) weight** never came back - the host sat in the queue wait until killed - while
@@ -64,7 +139,7 @@ cannot silently return.
 | capability | state |
 | --- | --- |
 | host backend `ggml-hexagon.dll` | builds from the Hexagon SDK, loads, registers `HTP0` |
-| DSP session | opens (`HTP0 allocating new session : domain 3 phys-idx 0 virt-idx 0`) |
+| DSP session | **no longer opens**: `HTP0 allocating new session` is printed before the attempt, then `remote_handle64_open` returns `0x200`; see the top of this note |
 | arch detected | `Hexagon Arch version v81`, `DMA64 enabled` |
 | kernels | the trellis types are not implemented for HTP; the head matmul runs on standard types |
 | MTP head on the DSP | does not fit (1.2 GB), and is not attempted |

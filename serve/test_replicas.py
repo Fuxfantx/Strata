@@ -12,8 +12,8 @@ from unittest import mock
 
 from serve.frontend import ChatTemplate
 from serve.replicas import (BLOCK, ReplicaConfigError, ReplicaEngine, Router, cpu_sets, gpu_groups, remove_arena,
-                            replica_cfg, shared_arena_plan, sweep_stale_arenas)
-from serve.server import ByteTokenizer, Service, StrataEngine, serve
+                            replica_cfg, shared_arena_plan, sweep_stale_arenas, with_cpu_replicas)
+from serve.server import ByteTokenizer, Service, StrataEngine, engine_args, parse_config_text, serve
 from serve.test_parallel import FAKE_BATCH
 
 
@@ -28,9 +28,54 @@ class Config(unittest.TestCase):
         self.assertEqual(gpu_groups({"replicas": [{"gpus": [0, 1]}, {"gpus": [2]}]}), [[0, 1], [2]])
         self.assertEqual(gpu_groups({"replicas": [{"gpus": [0, 1]}]}), [])
 
+    def test_a_cpu_replica_needs_no_cards(self):
+        """One integrated GPU: the second worker runs the CPU backend instead of a second card (PERFORMANCE.md 9.4)."""
+        self.assertEqual(gpu_groups({"replicas": [{"gpus": [0]}, {"backend": "cpu"}]}), [[0], []])
+        self.assertEqual(gpu_groups({"replicas": [{"backend": "cpu"}, {"gpus": [0]}]}), [[], [0]])
+        cpu = replica_cfg({"gpu": [0], "args": ["--ctx-size", "8192"]}, 1, [])
+        self.assertIsNone(cpu["gpu"])                                  # no card, so no card-reading helper trips over it
+        self.assertEqual(cpu["args"], ["--ctx-size", "8192", "--gpu", "cpu"])
+        self.assertEqual(replica_cfg({"gpu": [0], "args": []}, 0, [0])["gpu"], 0)
+        # a run whose settings already name the backend is left alone
+        self.assertEqual(replica_cfg({"gpu": [0], "args": ["--gpu", "vulkan"]}, 1, [])["args"], ["--gpu", "vulkan"])
+
+    def test_the_engine_gets_the_cpu_backend(self):
+        """The end of the wiring: the argv each replica would start with, built by the same function the launcher uses."""
+        cfg = {"gpu": [0], "args": ["--ctx-size", "8192"], "replicas": [{"gpus": [0]}, {"backend": "cpu"}]}
+        groups = gpu_groups(cfg)
+        card = engine_args(replica_cfg(cfg, 0, groups[0]), "strata-vk.exe", announce=False)
+        cpu = engine_args(replica_cfg(cfg, 1, groups[1]), "strata-vk.exe", announce=False)
+        self.assertEqual(card, ["--ctx-size", "8192"])                       # the default backend needs no flag
+        self.assertEqual(cpu, ["--ctx-size", "8192", "--gpu", "cpu"])        # ... and this one names the CPU
+
+    def test_the_cpu_replica_survives_a_config_file(self):
+        """The CLI can only say --replicas N, so the list form rides in the config file (--config, a JSON object)."""
+        import json
+        cfg = parse_config_text(json.dumps({"exe": "strata-vk.exe", "gpu": [0], "args": ["--native", "m.gguf"],
+                                            "replicas": [{"gpus": [0]}, {"backend": "cpu"}]}), None)
+        groups = gpu_groups(cfg)
+        self.assertEqual(groups, [[0], []])
+        self.assertEqual(engine_args(replica_cfg(cfg, 1, groups[1]), "strata-vk.exe", announce=False),
+                         ["--native", "m.gguf", "--gpu", "cpu"])
+
+    def test_replicas_cpu_adds_a_worker_beside_the_card(self):
+        """`--replicas-cpu 1` is the CLI form of one CPU worker beside the single card (with_replicas_cpu)."""
+        one = with_cpu_replicas({"gpu": 0, "args": []}, 1)
+        self.assertEqual(gpu_groups(one), [[0], []])
+        self.assertEqual(gpu_groups(with_cpu_replicas({"gpu": [0, 1]}, 1)), [[0, 1], []])
+        self.assertEqual(gpu_groups(with_cpu_replicas({"gpu": [0, 1], "replicas": 2}, 1)), [[0], [1], []])
+        two = gpu_groups(with_cpu_replicas({"gpu": 0}, 2))
+        self.assertEqual(two, [[0], [], []])
+        self.assertEqual(with_cpu_replicas({"gpu": 0}, 0), {"gpu": 0})            # off: the config is untouched
+        with self.assertRaises(ReplicaConfigError):
+            with_cpu_replicas({"gpu": 0, "args": []}, -1)                        # a negative count is a mistake
+        with self.assertRaises(ReplicaConfigError):
+            with_cpu_replicas({"args": []}, 1)                                     # no card named to sit beside
+
     def test_mistakes_are_said(self):
         for cfg in ({"gpu": [0, 1, 2], "replicas": 2}, {"replicas": 2}, {"replicas": "2"},
-                    {"replicas": [{"gpus": [0, 1]}, {"gpus": [1, 2]}]}, {"replicas": [{"gpus": []}, {"gpus": [1]}]}):
+                    {"replicas": [{"gpus": [0, 1]}, {"gpus": [1, 2]}]}, {"replicas": [{"gpus": []}, {"gpus": [1]}]},
+                    {"replicas": [{"backend": "npu"}, {"gpus": [1]}]}):
             with self.assertRaises(ReplicaConfigError, msg=cfg):
                 gpu_groups(cfg)
 

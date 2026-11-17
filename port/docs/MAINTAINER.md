@@ -72,10 +72,29 @@ code, because those are what the overlay patches.
 | encoding | `python port/tools/check-encoding.py` | 0 damaged files |
 | documents | `python port/tools/audit-docs.py` | 0 problems |
 | kernels | `build\bin\test-backend-ops.exe -o MUL_MAT -b Vulkan0` | 0 failures, and the run covers the trellis types (the 0.2.15 harness no longer matches `-p type_a=`) |
-| tokens | `--tokens 9707 --n 32` against the reference stream | identical, and identical to `--gpu cpu` |
+| tokens | `--tokens 9707 --n 32` against the reference stream | identical |
+| **backend logits** | `--dump-logits FILE` on `--gpu cpu` and on Vulkan, same prompt | correlation >= 0.999 and the same argmax |
+| CPU reference | `--gpu cpu --tokens 9707 --n 12` against the Vulkan stream, on the packs that hold it | identical on 27B-Q4_0 and 35B-A3B; Gyro-S at the first token and to 0.999, longer streams are a known near-tie race |
+
+The logits row is the one that matters. It is the gate that caught the f16-accumulate cooperative matrix
+(`PERFORMANCE.md` §4.1): that kernel passed a 32-token stream comparison on five packs and still returned a different
+distribution (correlation 0.02). A token-stream comparison is a weak oracle - it only sees near-ties it happens to hit.
+
+Two things about the token rows, both measured (2026-11-18):
+
+* **Gyro-S's CPU and Vulkan streams used to diverge at the eighth token.** With the f16-accumulate path off they agree on
+  the first token (`77`) and to 0.999 correlation; a stream over many tokens can still flip a near-tie, so quote the
+  thread count and the `STRATA_CPU_REPACK` state with any CPU reference stream, and prefer `-t 18` when comparing against
+  an older note. What the gate certifies for Gyro-S is the Vulkan reference stream, the backend oracle and `--gpu cpu`
+  byte-stability against itself.
+* **CPU token equality depends on the thread count and on the repack setting**, because both change a reduction tree / a gemv
+  order. For Gyro-S the repack-on stream diverges from the repack-off one at the eleventh token
+  (`PERFORMANCE.md` §3), and the engine chooses repack from the pack's dense byte count, so the state is not always
+  the obvious one.
 
 Any perf change also has to survive `python port/tools/bench_runs.py <exe> <pack> 3`: this machine's run-to-run spread is
-about 4%, so a single run proves nothing.
+about 4%, so a single run proves nothing - and with other work on the machine it can be far worse than 4%. `PERFORMANCE.md`
+§6 has the discipline this round had to use.
 
 ## Where the rest is written down
 
@@ -83,5 +102,5 @@ about 4%, so a single run proves nothing.
 | --- | --- |
 | `UPSTREAM-PATCHES.md` | every patch, file by file, with the measurement or the bug that justifies it |
 | `ADRENO.md` | the device: what it can do, the flags this port sets because of it, and the per-op measurements |
-| `OPTIMIZATION-BACKLOG.md` | the campaigns, including what was measured and ruled out |
+| `PERFORMANCE.md` | the campaigns, including what was measured and ruled out |
 | `features/` | hyper-connections, the gated delta net, expert placement, the NPU |

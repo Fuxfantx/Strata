@@ -23,6 +23,17 @@ namespace strata {
 // set when --dry-run printed the policy, so a null model is a success and not a load failure
 bool dry_run_finished = false;
 
+// The engine publishes the choices that depend on free memory at load time to the backend libraries through the
+// environment.  A value the user set always wins, so this only fills in a default.
+static void set_env_default(const char * name, const char * value) {
+    if (std::getenv(name) != nullptr) return;
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 0);
+#endif
+}
+
 // STRATA_VK_EVAL=<substring> dumps a checksum per graph node whose name matches, which is how the CUDA/Vulkan and the CPU
 // paths are compared node by node (see PORT-STATE.md, the qwen4exp defect).
 struct EvalDumpState {
@@ -32,9 +43,11 @@ struct EvalDumpState {
 static bool eval_dump_cb(struct ggml_tensor * t, bool ask, void * user_data) {
     auto * st = (EvalDumpState *) user_data;
     if (ask) {
-        return true;
+        // Only a matching node needs its own submit and synchronisation; answering true for every node turned one decode graph
+        // into 2824 submits with a device drain each, which cost more than the dump was worth.
+        return st->filter.empty() || std::strstr(t->name, st->filter.c_str()) != nullptr;
     }
-    if (!st->filter.empty() && std::string(t->name).find(st->filter) == std::string::npos) {
+    if (!st->filter.empty() && std::strstr(t->name, st->filter.c_str()) == nullptr) {
         return true;   // false would make the scheduler abort the rest of the split
     }
     const size_t nbytes = ggml_nbytes(t);
@@ -199,10 +212,6 @@ llama_model * Engine::load_model(const Options & opt, const NpuPlan & npu) {
     const size_t resident  = pack_bytes > ple_bytes ? pack_bytes - ple_bytes : pack_bytes;
 
     llama_model_params mp = llama_model_default_params();
-
-    // An optional companion pack: the tensors it carries replace the model's own, so a dense layer requantised to a
-    // faster type is used from there while the experts still come from the main pack.
-    mp.compat_path = opt.compat.empty() ? nullptr : opt.compat.c_str();
     mp.n_gpu_layers   = backend_ == GpuBackend::CPU ? 0 : 999;   // everything the backend will take
     // Direct I/O reads the file straight into the destination buffers; mmap maps it and then copies.  Measured on this
     // machine, direct is faster for every model here because the copy dominates: Gyro-M 87.3 -> 51.5 s, the Q2 pack
@@ -220,6 +229,18 @@ llama_model * Engine::load_model(const Options & opt, const NpuPlan & npu) {
              "rather than read: only the tensors that run become resident, and the ones marked read-on-demand stay in the "
              "file\n", (double) pack_bytes / (double) kGiB, (double) ram_avail / (double) kGiB);
     }
+    // The CPU backend's repack path turns a K-quant weight into an interleaved copy that an 8-row gemv reads, and it is worth
+    // a lot: on the 35B-A3B the dense matvec's op time goes 820 -> 80 ms, and the same run measures 33.8 -> 38.9 tok/s. It is
+    // gated here rather than left on, because a repacked tensor is anonymous memory where a mapped one was a file page, and that
+    // is the difference between a pack running and not. What the gate has to size is therefore **the part that gets copied**, not
+    // the pack: only the MUL_MAT-typed dense tensors are admitted (the expert stacks are trellis, the per-layer embedding table is
+    // a GET_ROWS table, and neither has a repack kernel), so the copy is pack minus experts minus the read-on-demand table.
+    // Gyro-S: 54.5 GiB pack, 24.0 of experts and 26.8 of table → 3.7 GiB copied, and measured 11.80 -> 12.10 tok/s decode
+    // (medians of four) and 18.01 -> 20.34 prefill. 27B and 35B-A3B already fitted whole. Q2_0 (67 GiB, 31.6 of experts) would
+    // copy ~8.6 GiB and is NOT measured; treat it as the first thing to check if that pack misbehaves.
+    const size_t repack_bytes = pack_bytes > (opt.expert_bytes + opt.disk_bytes)
+                              ? pack_bytes - (opt.expert_bytes + opt.disk_bytes) : 0;
+    set_env_default("STRATA_CPU_REPACK", (ram_avail == 0 || repack_bytes + kGiB <= ram_avail) ? "1" : "0");
     // The MTP head is a separate nextn-only GGUF, grafted into this model at load time.
     // The graft is driven by `mtp_path` being non-empty, not by `load_mtp` (llama-model-loader.cpp:809), so both have to
     // be cleared when this build cannot run the head - otherwise 1.2-2.2 GB of nextn tensors are loaded for nothing.
@@ -270,6 +291,14 @@ llama_model * Engine::load_model(const Options & opt, const NpuPlan & npu) {
                      (double) opt.expert_bytes / (double) kGiB, (double) ram_avail / (double) kGiB, moe_cache_mib_);
             }
         }
+    }
+    if (moe_cache_mib_ > 0 && opt.gpu == GpuBackend::CPU) {
+        // The cache is device memory for host-resident experts. The CPU backend has no device to put it on, and llama.cpp's
+        // cache throws when its device list is empty (llama-moe-cache.cpp), so `--gpu cpu` alone used to fail in the context
+        // instead of running. Drop the automatic size here; the experts stay in the model, which is the normal CPU path.
+        logf("[strata-vk] moe cache off: the CPU backend has no device to cache experts into\n");
+        moe_cache_mib_ = 0;
+        host_experts   = false;
     }
     if (host_experts) {
         // The f16-accumulate cooperative pipelines miscompute on this arch as soon as a batch carries more than a
@@ -391,12 +420,25 @@ bool Engine::load(const Options & opt, const NpuPlan & npu) {
     cp.n_ctx           = (uint32_t) n_ctx;
     cp.n_batch         = (uint32_t) std::min(opt.n_batch, n_ctx);
     cp.n_ubatch        = cp.n_batch;
-    cp.n_seq_max       = 1;
+    cp.n_seq_max       = (uint32_t) std::max(std::max(1, opt.slots), opt.parallel);
+    // The four values that decide whether llama.cpp divides the context among sequences: log them, so a later
+    // "n_ctx is not divisible by n_seq_max" can be read against what was actually requested instead of guessed at.
+    logf("[strata-vk] context params: n_ctx %u, batch %u, slots %d, parallel %d, n_seq_max %u\n",
+         cp.n_ctx, cp.n_batch, opt.slots, opt.parallel, cp.n_seq_max);
     // Keep 20% of the cores (with a one-big-two-small floor) genuinely free: the engine's threadpools are pinned to the rest
-    // (plan_affinity in vk-devices.cpp), so a browser and Office always find a core.
-    const AffinityPlan plan = plan_affinity(opt.perf_cap);
+    // (plan_affinity in vk-devices.cpp), so a browser and Office always find a core.  The CPU backend is the exception: it runs
+    // every node of the graph itself, so it takes the whole big-core class and leaves the little cores to the rest of the
+    // machine (plan_cpu_affinity, and PERFORMANCE.md for why the little cores are not worth a barrier wait).
+    const bool cpu_backend = opt.gpu == GpuBackend::CPU;
+    const AffinityPlan plan = cpu_backend ? plan_cpu_affinity(opt.threads) : plan_affinity(opt.perf_cap);
     cp.n_threads       = opt.threads > 0 ? std::min(opt.threads, plan.n_threads) : plan.n_threads;
-    cp.n_threads_batch = cp.n_threads;
+    // Two pools with two jobs.  Decode opens and closes a barrier per node, so it wants one core left for the engine's own main
+    // thread and the OS (that is what plan_cpu_affinity's "class minus one" is for, PERFORMANCE.md section 8).  A batch pass does
+    // not: it is throughput-bound, its matmuls are long, and the extra core is a straight 5% there (PERFORMANCE.md section 8.3),
+    // so the batch pool takes every core in the mask - but never more, or the pool oversubscribes the mask it is pinned to.
+    cp.n_threads_batch = cpu_backend && opt.threads <= 0
+                       ? (int) plan.cpus.size()
+                       : cp.n_threads;
     // The device-side cache for host-resident experts (llama_context_params, upstream's --moe-cache-size).
     if (moe_cache_mib_ > 0) {
         cp.moe_cache_size      = moe_cache_mib_ * 1024ull * 1024ull;
@@ -422,6 +464,13 @@ bool Engine::load(const Options & opt, const NpuPlan & npu) {
     cp.no_perf         = false;
     cp.offload_kqv     = true;
     cp.op_offload      = true;
+    // STRATA_VK_KV_UNIFIED=1 (experiment): llama_context_default_params leaves this false, while every llama.cpp tool that
+    // runs more than one sequence goes through common_params, which sets it true.  16384 cells for 2 sequences is what the
+    // non-unified cache reports; the question is whether it can serve a second sequence's prompt correctly.
+    if (std::getenv("STRATA_VK_KV_UNIFIED") != nullptr) {
+        cp.kv_unified = true;
+        logf("[strata-vk] kv_unified on: the cache holds one cell pool for every sequence\n");
+    }
     // llama.cpp refuses a quantised V cache without flash attention; a request for one must not cost the user the model,
     // so the engine says why and stays on f16.
     if (opt.kv == "q8_0" || opt.kv == "int8" || opt.kv == "q4_0") {
@@ -446,7 +495,10 @@ bool Engine::load(const Options & opt, const NpuPlan & npu) {
     // can drop a suffix on its own.  Requesting the ring unconditionally made --lookup cost ~8% on models that never use
     // it (35B-A3B: 40.5 -> 37.2 tok/s with zero drafts), so the request follows the model's kind instead of the flag.
     const bool model_needs_rollback = llama_model_is_recurrent(model_) || llama_model_is_hybrid(model_);
-    if ((opt.lookup != Tri::Off || !opt.mtp.empty()) && model_needs_rollback) {
+    // Only a drafter that can actually run earns the rollback ring: a bare --mtp that cannot load a head (vk-mtp.h:31-34), or
+    // an --lookup left on Auto, otherwise pays for it and drafts nothing.  Measured at about 2 ms per token when it was paid.
+    const bool mtp_runnable = !opt.mtp.empty() && mtp_supported_by_build();
+    if ((opt.lookup == Tri::On || mtp_runnable) && model_needs_rollback) {
         cp.n_rs_seq = (uint32_t) std::max(lookup_m_, 4);
     }
 
@@ -466,6 +518,20 @@ bool Engine::load(const Options & opt, const NpuPlan & npu) {
     }
     n_ctx_ = (int) llama_n_ctx(ctx_);
     batch_ = llama_batch_init((int32_t) cp.n_batch, 0, 1);
+    batch_cap_ = (int) cp.n_batch;
+    // --parallel N: one KV sequence per slot, and each slot's cache is the context divided by the sequence count that
+    // llama.cpp actually settled on (it rounds n_ctx down to a multiple of n_seq_max * 256).
+    if (opt.parallel > 1) {
+        const int seq = (int) std::max(1u, llama_n_seq_max(ctx_));
+        slot_st_.resize((size_t) opt.parallel);
+        slot_ctx_ = n_ctx_ / seq;
+        logf("[strata-vk] %d request slots, %d tokens of cache each (batch %d)\n", opt.parallel, slot_ctx_,
+             batch_cap_);
+        // Opt-in on purpose: the path is correct (slot 0 matches a solo run token for token, PERFORMANCE.md 20.50) but
+        // a 32-row step costs 32 single-row steps, so it buys no aggregate throughput on this backend yet.
+        logf("[strata-vk] %d slots: correct but no aggregate gain yet (a 32-row step costs 32 solo steps; "
+             "PERFORMANCE.md 20.50), so serve/server.py does not use it\n", opt.parallel);
+    }
     // `llama_n_rs_seq` reports what was actually configured: 0 means the architecture cannot roll back, or the request
     // was clamped away, and only then does speculation become impossible.
     spec_ok_ = !model_needs_rollback || llama_n_rs_seq(ctx_) > 0;
@@ -517,9 +583,14 @@ bool Engine::load(const Options & opt, const NpuPlan & npu) {
     if (getenv("STRATA_VK_NO_WARMUP") == nullptr) {
         const Clock::time_point tw = Clock::now();
         llama_context_params wcp = cp;
-        wcp.n_ctx    = 16;
-        wcp.n_batch  = 16;
-        wcp.n_ubatch = 16;
+        // One sequence, and a context that is already a multiple of 256: `n_ctx_seq` is `n_ctx / n_seq_max` padded up to
+        // 256, so 16 tokens over 32 sequences became an 8192-token context. `n_outputs_max` also defaults to `n_batch`,
+        // while every decode reserves `max(n_outputs, n_seq_max)` rows, so the 32 sequences of a batched run asserted
+        // here against this 16-token batch.
+        wcp.n_ctx     = 256;
+        wcp.n_seq_max = 1;
+        wcp.n_batch   = 16;
+        wcp.n_ubatch  = 16;
         wcp.moe_cache_size = 0;   // the cache belongs to the real context's budget
         llama_context * wctx = llama_init_from_model(model_, wcp);
         if (wctx != nullptr) {

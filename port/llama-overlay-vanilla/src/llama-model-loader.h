@@ -122,12 +122,16 @@ struct llama_model_loader {
     llama_mmaps mappings;
 
     std::map<std::string, llama_tensor_weight, weight_name_comparer> weights_map;
-    std::unordered_map<std::string, llama_model_kv_override> kv_overrides;
+    // STRATA_EXPERTS_Q8: a side-car GGUF whose tensors replace the pack's, type included (port/docs/PERFORMANCE.md section 18).
+    // A trellis expert tensor and its Q8_0 replacement differ in row size, so the type has to be known when the tensor is created
+    // - that is why this is filled in the constructor and read by create_tensor(), and why the data offset points into a file
+    // that init_mappings() maps like any other.
+    std::unordered_map<std::string, ggml_type> sidecar_type;
+    void apply_sidecar(const std::string & path);    std::unordered_map<std::string, llama_model_kv_override> kv_overrides;
     const llama_model_tensor_buft_override * tensor_buft_overrides;
 
     gguf_context_ptr metadata_ptr;
     gguf_context_ptr mtp_metadata; // the separate nextn-only gguf, when one was grafted
-    gguf_context_ptr compat_metadata; // companion pack with requantised tensors, when given
 
     // true when a separate nextn-only gguf was grafted onto this model
     bool has_mtp_head() const { return mtp_metadata != nullptr; }
@@ -187,8 +191,7 @@ struct llama_model_loader {
         bool load_mtp,
         const llama_model_kv_override * param_overrides_p,
         const llama_model_tensor_buft_override * param_tensor_buft_overrides_p,
-        const std::string & mtp_path,
-        const std::string & compat_path);
+        const std::string & mtp_path);
 
     template<typename T>
     typename std::enable_if<std::is_integral<T>::value, bool>::type

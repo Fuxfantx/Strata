@@ -1129,7 +1129,6 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "DSV4_HC_COMB",
     "DSV4_HC_PRE",
     "DSV4_HC_POST",
-    "GATED_MUL",
     "TOP_K_MASK",
 
     "UNARY",
@@ -1146,6 +1145,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_SGD",
 
     "GLU",
+    "GATED_MUL",
 };
 
 static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");

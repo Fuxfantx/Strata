@@ -16,6 +16,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <thread>
 
 using namespace strata;
 
@@ -88,6 +92,16 @@ int run_one_shot(Engine & engine, const Options & opt) {
     std::vector<llama_token> ids = opt.tokens;
     if (ids.empty() && !opt.prompt.empty()) ids = engine.tokenize(opt.prompt);
     if (ids.empty()) ids.push_back(1);
+    // STRATA_VK_ADMIT_DEBUG=1: the ids this prompt became, so the serve protocol can be driven with exactly what a real
+    // request carries instead of a synthetic id list (which this model answers with degenerate zeros; see 20.49).
+    if (std::getenv("STRATA_VK_ADMIT_DEBUG") != nullptr) {
+        std::string text;
+        for (llama_token t : ids) {
+            text += std::to_string((int) t);
+            text += ',';
+        }
+        logf("[strata-vk] prompt ids: %s\n", text.c_str());
+    }
     const int n = opt.max_new > 0 ? opt.max_new : 32;
     const Stats st = engine.generate(ids, n, "", [](llama_token t) {
         std::printf("%d,", (int) t);
@@ -133,12 +147,119 @@ int run_bench(Engine & engine, const Options & opt) {
     // A dummy prompt of repeated tokens reaches an end-of-generation token almost at once, which used to end the loop
     // after two tokens and report 0.6 tok/s: the benchmark wants `--bench-tg N` decodes whatever the sampler picks.
     engine.set_ignore_eog(true);
+    if (opt.slots > 0) {
+        // --batch-slots N: N sequences, one token each per step.  N = 1 is the same code as N > 1, so the two numbers are
+        // a paired comparison and not a comparison of two harnesses.
+        const Engine::SlotStats ss = engine.bench_slots(ids, opt.bench_n, opt.slots);
+        engine.set_ignore_eog(false);
+        if (ss.steps <= 0 || ss.ms <= 0) {
+            std::printf("slots %d: no step ran\n", opt.slots);
+            return 1;
+        }
+        const double agg = ss.tokens * 1000.0 / ss.ms;
+        std::printf("slots %d: %d tokens in %.1f ms = %.2f tok/s aggregate (%.2f per sequence, %.1f ms/step)\n", ss.slots,
+                    ss.tokens, ss.ms, agg, agg / ss.slots, ss.ms / ss.steps);
+        // The two epochs bracket the measured steps only, so port/tools/energy-ab.py can price a power sample window
+        // against this run without the prefills of `slots` sequences landing inside it.
+        logf("[strata-vk] bench window %.3f %.3f\n", ss.t0_epoch, ss.t1_epoch);
+        return 0;
+    }
     const Stats st = engine.generate(ids, opt.bench_n, "", [](llama_token) { return true; }, false);
     engine.set_ignore_eog(false);
     std::printf("tg %d tokens in %.1f ms = %.2f tok/s (prompt %.0f ms, cpu %.0f ms)\n", st.generated, st.decode_ms,
                 st.decode_ms > 0 ? st.generated * 1000.0 / st.decode_ms : 0.0, st.prompt_ms, st.decode_cpu_ms);
     return 0;
 }
+// Several llama_contexts on ONE model: the weights are the model's buffers, so this is the only concurrency that does not
+// duplicate a single byte of them.  Each context decodes one token per step on its own thread; the aggregate is the sum of
+// the rates, the same convention as two-serve.py.  --dual-contexts 1 runs the same code with one context, so the two
+// numbers come from one harness.
+int run_dual_bench(Engine & engine, const Options & opt) {
+    std::vector<llama_token> ids = opt.tokens;
+    if (ids.empty() && !opt.prompt.empty()) ids = engine.tokenize(opt.prompt);
+    if (ids.empty()) ids.assign(64, (llama_token) 1);
+    const int P     = (int) ids.size();
+    const int steps = opt.bench_dual;
+    const int nctx  = std::max(1, opt.dual_contexts);
+
+    llama_context_params cp = llama_context_default_params();
+    cp.n_ctx     = (uint32_t) std::max(engine.n_ctx(), P + steps + 8);
+    cp.n_batch   = 1024;
+    cp.n_ubatch  = 1024;
+    cp.n_seq_max = 1;
+    std::vector<llama_context *> ctxs((size_t) nctx, nullptr);
+    ctxs[0] = engine.context();
+    for (int i = 1; i < nctx; ++i) {
+        ctxs[(size_t) i] = llama_init_from_model(engine.model(), cp);
+        if (ctxs[(size_t) i] == nullptr) {
+            std::printf("dual: context %d could not be created\n", i);
+            return 1;
+        }
+    }
+
+    const int nv = llama_vocab_n_tokens(llama_model_get_vocab(engine.model()));
+    std::vector<double> ms((size_t) nctx, 0.0);
+    std::vector<int>    got((size_t) nctx, 0);
+    std::atomic<int>    ready{0};
+    std::atomic<bool>   go{false};
+
+    auto worker = [&](int idx) {
+        llama_context * c = ctxs[(size_t) idx];
+        llama_batch b = llama_batch_init(1024, 0, 1);
+        auto fill = [&](int row, llama_token t, int pos, int lg) {
+            b.token[row] = t; b.pos[row] = pos; b.n_seq_id[row] = 1; b.seq_id[row][0] = 0; b.logits[row] = lg;
+        };
+        int rows = 0;
+        for (int off = 0; off < P; off += 1024) {
+            const int n = std::min(1024, P - off);
+            for (int i = 0; i < n; ++i) fill(i, ids[(size_t) (off + i)], off + i, (off + i == P - 1) ? 1 : 0);
+            b.n_tokens = n;
+            rows = n;
+            if (llama_decode(c, b) != 0) { llama_batch_free(b); ready.fetch_add(1); return; }
+        }
+        auto argmax = [&](const float * l) {
+            int best = 0; float bv = l[0];
+            for (int v = 1; v < nv; ++v) if (l[v] > bv) { bv = l[v]; best = v; }
+            return (llama_token) best;
+        };
+        const float * l0 = llama_get_logits_ith(c, rows - 1);
+        if (l0 == nullptr) { llama_batch_free(b); ready.fetch_add(1); return; }
+        llama_token cur = argmax(l0);
+        ready.fetch_add(1);
+        while (!go.load()) std::this_thread::yield();
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int t = 0; t < steps; ++t) {
+            fill(0, cur, P + t, 1);
+            b.n_tokens = 1;
+            if (llama_decode(c, b) != 0) break;
+            const float * l = llama_get_logits_ith(c, 0);
+            if (l == nullptr) break;
+            cur = argmax(l);
+            got[(size_t) idx] = t + 1;
+        }
+        ms[(size_t) idx] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        llama_batch_free(b);
+    };
+
+    std::vector<std::thread> th;
+    th.reserve((size_t) nctx);
+    for (int i = 0; i < nctx; ++i) th.emplace_back(worker, i);
+    while (ready.load() < nctx) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    go.store(true);
+    for (auto & t : th) t.join();
+
+    double agg = 0.0;
+    for (int i = 0; i < nctx; ++i) {
+        const double rate = ms[(size_t) i] > 0 ? got[(size_t) i] * 1000.0 / ms[(size_t) i] : 0.0;
+        agg += rate;
+        std::printf("ctx %d: %d tokens in %.1f ms = %.2f tok/s\n", i, got[(size_t) i], ms[(size_t) i], rate);
+    }
+    std::printf("dual %d contexts: %.2f tok/s aggregate (one model, one copy of the weights)\n", nctx, agg);
+
+    for (int i = 1; i < nctx; ++i) llama_free(ctxs[(size_t) i]);
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -149,15 +270,21 @@ int main(int argc, char ** argv) {
     // created, the HTP mapping budget before the Hexagon backend reads it.  An unresolved Auto still applies the Vulkan
     // knobs, because Auto resolves to Vulkan whenever that backend exists.
     const ModelFacts facts = opt.version || opt.model.empty() ? ModelFacts{} : read_model_facts(opt.model);
-    apply_adreno_tuning(opt.gpu, facts.dense_matmul, facts.q20_only, facts.lowbit_pack);
+    apply_adreno_tuning(opt.gpu, facts.dense_matmul, facts.q20_only, facts.lowbit_pack, opt.shader_family);
     Options opt_load = opt;
     opt_load.expert_bytes = facts.expert_bytes;
     opt_load.disk_bytes   = facts.disk_bytes;
 #ifdef _WIN32
     // Leave the reserved cores genuinely free for the rest of the machine: the engine's threads (and ggml's) are pinned to
     // the cores plan_affinity leaves us, which is 20% of the machine with a one-big-two-small floor.
+    //
+    // With --gpu cpu the CPU backend runs every node itself, so the mask is the big-core class instead: a barrier opens and closes
+    // each node of each decode step, a heterogeneous pool pays its slowest core on every one of them, and the six 3072 MHz cores
+    // measured more expensive at the barrier than they return in work (PERFORMANCE.md, the thread sweep).
     {
-        const AffinityPlan ap = opt.perf_cap < 100 ? plan_affinity(opt.perf_cap) : AffinityPlan{};
+        const AffinityPlan ap = opt.gpu == GpuBackend::CPU ? plan_cpu_affinity(opt.threads)
+                              : opt.perf_cap < 100        ? plan_affinity(opt.perf_cap)
+                                                          : AffinityPlan{};
         const int total = (int) std::thread::hardware_concurrency();
         if (!ap.cpus.empty() && (int) ap.cpus.size() < total && total <= 64) {
             DWORD_PTR mask = 0;
@@ -165,6 +292,10 @@ int main(int argc, char ** argv) {
             if (!SetProcessAffinityMask(GetCurrentProcess(), mask)) {
                 logf("[strata-vk] could not pin the engine to its %d cores; the OS decides\n", (int) ap.cpus.size());
             }
+        }
+        if (opt.gpu == GpuBackend::CPU && !ap.cpus.empty()) {
+            logf("[strata-vk] CPU backend: %d threads on the big-core class (%d of %d cores)\n",
+                 ap.n_threads, (int) ap.cpus.size(), total);
         }
     }
 #endif
@@ -221,6 +352,8 @@ int main(int argc, char ** argv) {
         CommandQueue q;
         start_stdin_reader(q);
         rc = serve(engine, q);
+    } else if (opt.bench_dual > 0) {
+        rc = run_dual_bench(engine, opt);
     } else if (opt.bench_pp || opt.bench_tg) {
         rc = run_bench(engine, opt);
     } else {

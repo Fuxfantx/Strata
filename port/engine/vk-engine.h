@@ -57,6 +57,10 @@ public:
 
     int  n_ctx() const { return n_ctx_; }
     bool ready() const { return ctx_ != nullptr; }
+    // The loaded model and this context, for the concurrent-context benchmark: a second llama_context on the same model
+    // shares its weight buffers, so two decodes can run at once on one copy of the weights.
+    llama_model   * model()   const { return model_; }
+    llama_context * context() const { return ctx_; }
     std::string describe() const;
 
     /** Tokenise text the way the app's prompt would be tokenised (BOS added when the model wants one). */
@@ -70,6 +74,35 @@ public:
 
     /** Benchmark mode: keep decoding past an end-of-generation token, which a dummy prompt hits immediately. */
     void set_ignore_eog(bool v) { ignore_eog_ = v; }
+
+    // Concurrent decode: `slots` independent sequences, each prefilled with `prompt`, then one token per sequence per
+    // llama_decode.  Sampling is argmax, so no sampler state is shared between sequences.  `slots` = 1 and `slots` > 1 run
+    // through this same function, which is what makes their numbers comparable.
+    // `t0_epoch`/`t1_epoch` bracket the measured loop only, not the per-sequence prefills, so an outside power sampler
+    // can price the decode steps without the prompt work of `slots` sequences in the same window.
+    struct SlotStats { int slots = 0, steps = 0, tokens = 0; double ms = 0.0, t0_epoch = 0.0, t1_epoch = 0.0; };
+    SlotStats bench_slots(const std::vector<llama_token> & prompt, int steps, int slots);
+
+    // --parallel N: N request slots, each one KV sequence, all stepping together in a single batch.  This is the serve
+    // path's concurrency: one process, one copy of the weights, N requests in flight (PERFORMANCE.md section 20.44).
+    // Only the protocol layer above decides what a slot means; the engine owns the sequences and the step.
+    struct SlotAdmit { bool ok = false; llama_token first = 0; double pp_ms = 0.0; bool continues = false; bool eog = false;
+                       std::string error; };
+    // `fresh` says whether `tok` is a token this step produced; a slot that is only being closed reports no token.
+    struct SlotEvent { int slot = 0; llama_token tok = 0; bool fresh = false; bool done = false; bool eog = false;
+                       int produced = 0; };
+    int  parallel_slots() const { return (int) slot_st_.size(); }
+    int  slot_ctx() const { return slot_ctx_; }
+    int  slot_active() const;
+    // An admission reads its prompt in chunks so that the slots already running keep decoding between them: a prompt
+    // read to the end in one call turns the wait into wall time that no other request can use (section 20.46).
+    SlotAdmit slot_begin(int slot, const std::vector<llama_token> & ids, int max_new, const std::string & keys);
+    int  slot_prefill_chunk(int slot, int chunk);          // prompt tokens read, 0 when the prompt is complete
+    bool slot_admit_report(int slot, SlotAdmit & out);      // fills the `T`/`DONE`/`BADM` fields once it is complete
+    void slot_stop(int slot);
+    // One token for every active slot, in one batch.  A slot that ends is reported with `done`: it has no further token,
+    // and its sequence is dropped so the next request on that slot starts from an empty cache.
+    void slot_step(std::vector<SlotEvent> & out);
 
     // One generation.  `ids` is the whole prompt as the server builds it every turn; only the suffix past the tokens
     // already in the KV cache is decoded.  `on_token` returns false to stop early.
@@ -137,7 +170,9 @@ public:
         // A non-greedy chain or a penalty window has state that a rejected draft would corrupt, so those requests never
         // speculate; the answer must stay exactly what a plain run would produce.
         const bool can_mtp    = greedy && mtp_.ready() && last_chunk_n > 0;
-        const bool can_lookup = greedy && spec_ok_ && opt_.lookup != Tri::Off;
+        // Tri::Auto resolves to off here: the option's own note records that a verify pass on this backend costs more than
+        // the tokens it can save, so only an explicit --lookup on takes the risk.
+        const bool can_lookup = greedy && spec_ok_ && opt_.lookup == Tri::On;
         if (can_mtp) mtp_prime(last_chunk, last_chunk_n, last_chunk_pos);
 
         if (!opt_.dump_logits.empty() && !dump_done_) {
@@ -156,6 +191,8 @@ public:
             }
         }
 
+        static const bool admit_dbg = std::getenv("STRATA_VK_ADMIT_DEBUG") != nullptr;
+        if (admit_dbg) debug_logits_row("solo row -1", -1);
         llama_token tok = llama_sampler_sample(smpl, ctx_, -1);
         Clock::time_point tg = Clock::now();
         const double decode_cpu0 = process_cpu_ms();
@@ -198,7 +235,8 @@ public:
                 const Clock::time_point ts = Clock::now();
                 // STRATA_VK_RDC=<step>: wrap exactly one decode step in a RenderDoc frame capture (vk-rdc.cpp).  The
                 // capture therefore holds one graph, with every pipeline and descriptor of a single token in it.
-                const bool rdc = rdc_capture_wanted(st.generated);
+                static const bool rdc_on = std::getenv("STRATA_VK_RDC") != nullptr;
+                const bool rdc = rdc_on && rdc_capture_wanted(st.generated);
                 if (rdc) rdc_capture_begin();
                 if (!decode(&tok, 1, pos, true)) { st.finish = "error"; break; }
                 if (profile_tok) {
@@ -274,11 +312,17 @@ private:
     std::vector<llama_token> lookup_draft(const std::vector<llama_token> & hist, llama_token sampled, int budget);
     // Bring the n-gram index up to the history it is asked about; rebuilds it when the history was trimmed.
     void index_ngrams(const std::vector<llama_token> & hist);
+
+    // The sampler chain is a pure function of the request's sampling keys but it also carries that request's penalty
+    // window, so every caller gets its own and frees it (see make_sampler).
     // Decode the draft in one target pass, keep the prefix the target agrees with, and report the token that follows.
     bool verify_draft(llama_sampler * smpl, llama_token cur, const std::vector<llama_token> & draft,
                       std::vector<llama_token> & agreed, llama_token & next, bool use_mtp);
     void mtp_prime(const llama_token * toks, int n, int pos0);
     llama_sampler * make_sampler(const std::string & keys, bool * greedy) const;
+    // STRATA_VK_ADMIT_DEBUG=1: summarise a logits row by index, so a first token that differs between a solo run and a
+    // slot can be blamed on the row (the model state) or on the sampler (the chain) rather than guessed at.
+    void debug_logits_row(const char * tag, int32_t idx) const;
 
     Options opt_;
     NpuPlan npu_;
@@ -289,7 +333,25 @@ private:
     llama_context * ctx_ = nullptr;
     const llama_vocab * vocab_ = nullptr;
     llama_batch batch_ = {};
+    int         batch_cap_ = 0;   // rows batch_ can hold; the drafters must never exceed it
     int n_ctx_ = 0;
+    // --parallel N: one entry per slot, empty unless `--serve` was asked for more than one.  `slot_ctx_` is the cache a
+    // slot owns, `n_ctx / n_seq_max`, which is what bounds a slot's prompt plus its reply.
+    struct SlotState {
+        bool active = false, cancel = false;
+        int  max_new = 0, produced = 0, pos = 0;
+        llama_token next = 0;
+        llama_sampler * smpl = nullptr;
+        // A slot that is still reading its prompt: `prompt`/`prefill_off` walk it a chunk at a time, and `ready` says the
+        // first token has been sampled and the admission's `T`/`DONE`/`BADM` are owed.
+        bool prefilling = false, ready = false;
+        std::vector<llama_token> prompt;
+        int  prefill_off = 0;
+        Clock::time_point pp_t0{};
+        SlotAdmit admit;
+    };
+    std::vector<SlotState> slot_st_;
+    int slot_ctx_ = 0;
     Clock::time_point load_t0_{};
     bool wire_ = false;                        // serve mode: the protocol lines own stdout
     bool ignore_eog_ = false;                  // benchmark mode: an end-of-generation token does not stop the loop

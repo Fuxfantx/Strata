@@ -1232,9 +1232,18 @@ void ggml_vk_sync_buffers(ggml_backend_vk_context* ctx, vk_context& subctx, int 
         ? (vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite)
         : (vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite);
 
+    // The queue's stage mask names stages this backend never records into that queue, and a barrier is only as cheap as
+    // the stages it names.  Narrow it to what is actually recorded: compute and transfer commands.
+    static const bool wide_stage = getenv("STRATA_VK_BARRIER_WIDE_STAGE") != nullptr;
+    const vk::PipelineStageFlags barrier_stage = wide_stage
+        ? subctx->p->q->stage_flags
+        : (transfer_queue ? vk::PipelineStageFlags(vk::PipelineStageFlagBits::eTransfer)
+                          : vk::PipelineStageFlags(vk::PipelineStageFlagBits::eComputeShader |
+                                                   vk::PipelineStageFlagBits::eTransfer));
+
     subctx->s->buffer->buf.pipelineBarrier(
-        subctx->p->q->stage_flags,
-        subctx->p->q->stage_flags,
+        barrier_stage,
+        barrier_stage,
         {},
         { { { src_access }, { dst_access } } },
         {},
@@ -2221,8 +2230,14 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             }
         }
 
+        // Strata: the Adreno X2-90 reports an Sint8 x Sint8 -> Sint32 cooperative matrix (64x64x32).  That path is
+        // exact (int32 accumulate) where the f16-accumulate one that this device also exposes is not.  Upstream builds
+        // the int8 cooperative MMQ pipelines for AMD RDNA3/4 only; STRATA_VK_INT8_COOPMAT=1 opens them on Qualcomm too.
+        const bool strata_int8_cm = device->vendor_id == VK_VENDOR_ID_QUALCOMM &&
+                                    std::getenv("STRATA_VK_INT8_COOPMAT") != nullptr;
         const bool use_cm1_int = device->coopmat_int_support &&
-                                 (device->architecture == AMD_RDNA3 || device->architecture == AMD_RDNA4);
+                                 (device->architecture == AMD_RDNA3 || device->architecture == AMD_RDNA4 ||
+                                  strata_int8_cm);
 
         for (uint32_t i = 0; i < GGML_TYPE_COUNT; ++i) {
             ggml_type t = (ggml_type)i;
@@ -2913,7 +2928,8 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         }
 #undef X_CM1
 
-        if (device->coopmat_int_support && (rdna3 || rdna4)) {
+        if (device->coopmat_int_support && (rdna3 || rdna4 ||
+                (device->vendor_id == VK_VENDOR_ID_QUALCOMM && std::getenv("STRATA_VK_INT8_COOPMAT") != nullptr))) {
             cm1_create_mmq({GGML_TYPE_Q4_0,   GGML_TYPE_Q8_1, false, false}, tc_mmq_cm1_int,   "matmul_q4_0_q8_1",   matmul_q4_0_q8_1_cm1_len,   matmul_q4_0_q8_1_cm1_data,   sizeof(vk_mat_mat_push_constants), 3);
             if (!rdna4) { cm1_create_mmq({GGML_TYPE_Q4_1, GGML_TYPE_Q8_1, false, false}, tc_mmq_cm1_int,   "matmul_q4_1_q8_1",   matmul_q4_1_q8_1_cm1_len,   matmul_q4_1_q8_1_cm1_data,   sizeof(vk_mat_mat_push_constants), 3); }
             cm1_create_mmq({GGML_TYPE_Q5_0,   GGML_TYPE_Q8_1, false, false}, tc_mmq_cm1_int,   "matmul_q5_0_q8_1",   matmul_q5_0_q8_1_cm1_len,   matmul_q5_0_q8_1_cm1_data,   sizeof(vk_mat_mat_push_constants), 3);
@@ -2986,7 +3002,8 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         }
 #undef X_CM1_ID
 
-        if (device->coopmat_int_support && (rdna3 || rdna4)) {
+        if (device->coopmat_int_support && (rdna3 || rdna4 ||
+                (device->vendor_id == VK_VENDOR_ID_QUALCOMM && std::getenv("STRATA_VK_INT8_COOPMAT") != nullptr))) {
             cm1_create_mmq({GGML_TYPE_Q4_0,   GGML_TYPE_Q8_1, true, false}, tc_mmq_cm1_int,   "matmul_id_subgroup_q4_0_q8_1",   matmul_id_subgroup_q4_0_q8_1_cm1_len,   matmul_id_subgroup_q4_0_q8_1_cm1_data,   sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count);
             cm1_create_mmq({GGML_TYPE_Q4_1,   GGML_TYPE_Q8_1, true, false}, tc_mmq_cm1_int,   "matmul_id_subgroup_q4_1_q8_1",   matmul_id_subgroup_q4_1_q8_1_cm1_len,   matmul_id_subgroup_q4_1_q8_1_cm1_data,   sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count);
             cm1_create_mmq({GGML_TYPE_Q5_0,   GGML_TYPE_Q8_1, true, false}, tc_mmq_cm1_int,   "matmul_id_subgroup_q5_0_q8_1",   matmul_id_subgroup_q5_0_q8_1_cm1_len,   matmul_id_subgroup_q5_0_q8_1_cm1_data,   sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count);
@@ -3471,6 +3488,13 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     } else if (device->vendor_id == VK_VENDOR_ID_INTEL) {
         rm_stdq = 2;
         rm_stdq_int = 2;
+    } else if (device->vendor_id == VK_VENDOR_ID_QUALCOMM) {
+        // Six rows per workgroup, three times the two-row default, on the Adreno X2-90: Gyro-S decode goes 10.05 -> 10.36 tok/s
+        // (medians of four paired runs each, ranges disjoint: 9.98-10.05 against 10.10-10.37).  Eight rows is worse than six
+        // (10.20) and two is the old default, so the curve is flat-topped at six and this is not a knob left to the user.
+        // rm_tq is computed above from the unscaled rm_stdq, so the trellis multiplier (20, tuned at two rows) is unaffected.
+        rm_stdq = 3;
+        rm_kq   = 3;
     }
     // RDNA3/4: above four columns, static 4 rows for all types bench faster than the default
     const bool is_rdna3_or_4 = device->vendor_id == VK_VENDOR_ID_AMD && (device->architecture == AMD_RDNA3 || device->architecture == AMD_RDNA4);
@@ -6356,6 +6380,15 @@ static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec(ggml_backend_vk_context * 
 
     // heuristic to choose workgroup size
     uint32_t dmmv_wg = DMMV_WG_SIZE_SUBGROUP;
+    // The vendor tests below never match this GPU, so its matvec workgroup size has never been measured here.  Force one and see.
+    static const char * dmmv_wg_env = getenv("STRATA_VK_DMMV_WG");
+    if (dmmv_wg_env != nullptr) {
+        if (strcmp(dmmv_wg_env, "large") == 0) {
+            dmmv_wg = DMMV_WG_SIZE_LARGE;
+        } else if (strcmp(dmmv_wg_env, "subgroup") == 0) {
+            dmmv_wg = DMMV_WG_SIZE_SUBGROUP;
+        }
+    }
     if ((ctx->device->vendor_id == VK_VENDOR_ID_NVIDIA && ctx->device->architecture != vk_device_architecture::NVIDIA_PRE_TURING) || ctx->device->vendor_id == VK_VENDOR_ID_INTEL) {
         // Prefer larger workgroups when M is small, to spread the work out more
         // and keep more SMs busy.
@@ -6452,6 +6485,15 @@ static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec_id(ggml_backend_vk_context
 
     // heuristic to choose workgroup size
     uint32_t dmmv_wg = DMMV_WG_SIZE_SUBGROUP;
+    // The vendor tests below never match this GPU, so its matvec workgroup size has never been measured here.  Force one and see.
+    static const char * dmmv_wg_env = getenv("STRATA_VK_DMMV_WG");
+    if (dmmv_wg_env != nullptr) {
+        if (strcmp(dmmv_wg_env, "large") == 0) {
+            dmmv_wg = DMMV_WG_SIZE_LARGE;
+        } else if (strcmp(dmmv_wg_env, "subgroup") == 0) {
+            dmmv_wg = DMMV_WG_SIZE_SUBGROUP;
+        }
+    }
     if ((ctx->device->vendor_id == VK_VENDOR_ID_NVIDIA && ctx->device->architecture != vk_device_architecture::NVIDIA_PRE_TURING) || ctx->device->vendor_id == VK_VENDOR_ID_INTEL) {
         // Prefer larger workgroups when M is small, to spread the work out more
         // and keep more SMs busy.
@@ -17008,6 +17050,13 @@ static enum ggml_backend_dev_type ggml_backend_vk_device_get_type(ggml_backend_d
 static void ggml_backend_vk_device_get_props(ggml_backend_dev_t dev, struct ggml_backend_dev_props * props) {
     ggml_backend_vk_device_context * ctx = (ggml_backend_vk_device_context *)dev->context;
 
+    // STRATA_VK_HOST_PTR=1 advertises host-pointer buffers on a single device so the loader can wrap the mmap'd
+    // weights instead of copying them. Measurement only: llama-model throws when a range cannot be imported.
+    bool host_ptr = false;
+    if (const char * e = getenv("STRATA_VK_HOST_PTR")) {
+        host_ptr = e[0] == '1' && e[1] == '\0';
+    }
+
     props->name        = ggml_backend_vk_device_get_name(dev);
     props->description = ggml_backend_vk_device_get_description(dev);
     props->type        = ggml_backend_vk_device_get_type(dev);
@@ -17016,9 +17065,9 @@ static void ggml_backend_vk_device_get_props(ggml_backend_dev_t dev, struct ggml
     props->caps = {
         /* .async                 = */ true,
         /* .host_buffer           = */ true,
-        /* .buffer_from_host_ptr  = */ false,
+        /* .buffer_from_host_ptr  = */ host_ptr,
         /* .events                = */ true,
-        /* .mmap_support          = */ !ctx->is_integrated_gpu,
+        /* .mmap_support          = */ host_ptr || !ctx->is_integrated_gpu,
     };
 }
 

@@ -34,6 +34,16 @@ struct Options {
     std::string model;
     int  n_ctx      = kDefaultCtx;
     int  n_batch    = kDefaultBatch;
+    // --batch-slots N: how many independent sequences the context may hold.  0 keeps the single-sequence engine exactly
+    // as it was; N >= 1 is the concurrent-decode path, which the benchmark drives so that N = 1 and N > 1 run through the
+    // same code and can be compared directly.
+    int  slots      = 0;
+    // --parallel N (the server's spelling is `--batch N`): N request slots in `--serve`.  Each slot owns one KV sequence
+    // and they step together, one token each, in a single batch, so N requests share one copy of the weights.
+    int  parallel   = 0;
+    // --bench-dual N: N decode steps per context, on --dual-contexts separate llama_contexts that share one model.
+    int  bench_dual     = 0;
+    int  dual_contexts  = 2;
     int  threads    = 0;
     // 1-100: share of wall time the engine may spend working, so the rest of the machine stays usable.
     // Host-resident experts (llama.cpp's --cpu-moe): the expert tensors stay in host memory and the device keeps a bounded
@@ -48,6 +58,9 @@ struct Options {
     // llama_model_params::devices, so the scheduler owns the cross-device copies.
     float split_cpu = 0.0f;
     int  perf_cap   = 100;  // opt-in only: --perf-cap N reserves N% of the machine; 100 = full speed (the default)
+    // --shader-family: 0 auto (the per-model policy below), 1 f16 shaders, 2 fp32 shaders.  On this device the two are a
+    // real trade: f16 is the better decode, fp32 the better prefill (PERFORMANCE.md section 1).
+    int  shader_family = 0;
     int  max_new    = 0;              // --n, one-shot generation
     std::string prompt;               // --prompt: tokenised with the model's own vocab, for a run without the app
     bool serve      = false;
@@ -62,9 +75,6 @@ struct Options {
     std::string kv  = "f16";
     bool dry_run    = false;   // print the effective policy and exit, without loading the weights
     std::string mtp;                  // --mtp FILE: the nextn head that drafts (see vk-mtp.h)
-
-    // --compat FILE: optional companion pack with requantised copies of some tensors (make-compat.ps1)
-    std::string compat;
     Tri  lazy       = Tri::Auto;      // the engine forwards Strata's policy, it does not choose
     std::string load_mode = "direct";  // --load-mode mmap|direct|none: measured, see vk-engine-load.cpp
     bool load_mode_set = false;        // the user named --load-mode, so a pack that does not fit must not override it

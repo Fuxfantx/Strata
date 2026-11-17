@@ -319,6 +319,15 @@ inline void ggml_vk_dispatch_pipeline(ggml_backend_vk_context* ctx, vk_context& 
     if (pipe_log) {
         std::fprintf(stderr, "[pipe] %s %ux%ux%u\n", pipeline->name.c_str(), wg0, wg1, wg2);
     }
+    // STRATA_VK_SKIP=<substring>: measurement-only ablation.  A dispatch whose pipeline name contains the substring is logged as
+    // usual and then not issued, so the graph still walks and every buffer keeps whatever it held.  The output is wrong by design
+    // - the wall clock is the measurement, and it answers "what does this pipeline family cost" without a capture.  Never a
+    // shipped path: a wrong buffer can produce denormals and make the rest of the graph slower, so a result that is *slower* than
+    // the baseline means garbage, not a cheap class.
+    static const char * skip_sub = std::getenv("STRATA_VK_SKIP");
+    if (skip_sub != nullptr && skip_sub[0] != '\0' && pipeline->name.find(skip_sub) != std::string::npos) {
+        return;
+    }
     VK_LOG_DEBUG("ggml_vk_dispatch_pipeline(" << pipeline->name << ", {";
     for (auto& buffer : descriptor_buffer_infos) {
         std::cerr << "(" << buffer.buffer << ", " << buffer.offset << ", " << buffer.range << "), ";

@@ -368,11 +368,6 @@ extern "C" {
         bool no_alloc;        // only load metadata and simulate memory allocations
         bool load_mtp;        // whether to load MTP layers
         const char * mtp_path; // separate nextn-only gguf to graft; null to use tensors already in the model
-
-        // Optional companion pack holding requantised copies of some tensors (port/tools/make-compat.ps1).
-        // Each tensor it carries replaces the model's own, so the model builds it with the companion type; every
-        // other tensor is read from the main pack.  Null keeps the original behaviour.
-        const char * compat_path;
     };
 
     struct llama_sampler_seq_config {
@@ -478,12 +473,6 @@ extern "C" {
         const struct llama_model_tensor_override * tt_overrides;    // pointer to tensor overrides
         const int32_t * prune_layers;                               // pointer to layer indices to prune
         size_t max_buf_size;                                        // max bytes of tensor rows kept in memory at once, 0 = default (8 GiB)
-
-    // Only tensors whose name matches this regular expression are written to the output; null or empty means all.
-    // This is what produces a companion pack carrying just the dense weights, requantised for the fast kernels,
-    // while the original pack keeps the tensors nobody wants to change.  Last member on purpose: the default
-    // initialiser in llama-quant.cpp is positional.
-    const char * only_tensors;
     } llama_model_quantize_params;
 
     typedef struct llama_logit_bias {

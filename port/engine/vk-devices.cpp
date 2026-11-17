@@ -197,7 +197,10 @@ const char * dev_kind(enum ggml_backend_dev_type type) {    switch (type) {
 struct ModelPolicy {
     bool fp32_shaders = false;   // dense packs: the fp32 shaders are up to 2.2x faster on the int-dot mat-mat
     bool int_dot_off  = false;   // q2_0-only packs: their dp4a fp16 shader crashes this driver on a multi-token prefill
-    bool coop_f16acc  = true;    // the f16-accumulate cooperative matrix, everywhere (identical token streams)
+    // The f16-accumulate cooperative matrix was on everywhere on the strength of "identical token streams".  That is not
+    // true on this driver: against the CPU backend the logits correlate 0.02 and the top token changes (PERFORMANCE.md
+    // 20.50).  Off by default; STRATA_VK_F16ACC=1 still selects it for a shape-only benchmark.
+    bool coop_f16acc  = false;
 };
 
 static ModelPolicy decide_policy(bool dense_model, bool q20_only) {
@@ -207,7 +210,7 @@ static ModelPolicy decide_policy(bool dense_model, bool q20_only) {
     return p;
 }
 
-void apply_adreno_tuning(GpuBackend backend, bool dense_model, bool q20_only, bool lowbit_pack) {
+void apply_adreno_tuning(GpuBackend backend, bool dense_model, bool q20_only, bool lowbit_pack, int shaders) {
     // STRATA_VK_ADRENO_TUNING=0 runs every knob at the backend's own default, which is what a sweep needs to measure the
     // defaults against the tuning.
     if (const char * off = std::getenv("STRATA_VK_ADRENO_TUNING"); off != nullptr && std::strcmp(off, "0") == 0) {
@@ -218,8 +221,14 @@ void apply_adreno_tuning(GpuBackend backend, bool dense_model, bool q20_only, bo
     for (const TuningKnob & k : kVulkanTuning) set_env_once(k.name, "1");
 
     ModelPolicy policy = decide_policy(dense_model, q20_only);
-    // STRATA_VK_F16=on|off forces the shader family; the int-dot decision follows it because it is about the same choice.
-    if (const char * f = std::getenv("STRATA_VK_F16")) {
+    // The shader family is a real trade, so it is a first-class choice: f16 shaders are the better decode, fp32 shaders
+    // the better prefill on this device (Gyro-S 10.7 against 5.5 decode, 19.3 against 46.6 prefill, PERFORMANCE.md §1).
+    // `--shader-family` wins; STRATA_VK_F16=on|off stays for an A/B without touching the command line.
+    if (shaders != 0) {
+        policy.fp32_shaders = shaders == 2;
+        policy.int_dot_off  = q20_only && !policy.fp32_shaders;
+        logf("[strata-vk] --shader-family %s\n", shaders == 2 ? "fp32" : "f16");
+    } else if (const char * f = std::getenv("STRATA_VK_F16")) {
         policy.fp32_shaders = std::strcmp(f, "on") != 0;
         policy.int_dot_off  = q20_only && !policy.fp32_shaders;
     }
@@ -228,17 +237,28 @@ void apply_adreno_tuning(GpuBackend backend, bool dense_model, bool q20_only, bo
     if (policy.fp32_shaders) {
         for (const TuningKnob & k : kIntDotTuning) set_env_once(k.name, "1");
     }
-    if (policy.int_dot_off) set_env_once("GGML_VK_DISABLE_INTEGER_DOT_PRODUCT", "1");
-    // Its kernel accumulates in f16 and so fails the strict element-wise oracle by construction; that is what
-    // STRATA_VK_F16ACC=0 is for, and why the model-level token-equality gates are the ones that cover this path.
+    if (policy.int_dot_off) {
+        // This disables dp4a for the whole device, decode included, for a crash that only happens on a multi-token prefill: a
+        // q2_0-only pack pays it on every matvec of every token.  Kept because the alternative is a crash, but said out loud.
+        logf("[strata-vk] int-dot off for the whole device: q2_0 prefill crashes this driver, decode pays for it\n");
+        set_env_once("GGML_VK_DISABLE_INTEGER_DOT_PRODUCT", "1");
+    }
+    // Its kernel accumulates in f16, which on this driver does not just fail the strict element-wise oracle: it returns a
+    // different distribution (PERFORMANCE.md 20.50).  Off by default, and an explicit STRATA_VK_F16ACC=1 still reaches it
+    // for a shape-only benchmark.
     if (policy.coop_f16acc) {
         f16acc_from_policy = getenv("STRATA_VK_F16ACC") == nullptr;
         set_env_once("STRATA_VK_F16ACC", "1");
     }
 
+    // Report the mode in force, not the constant: host-resident experts and an explicit STRATA_VK_F16ACC both move it, and
+    // a log that says otherwise mislabels every A/B recorded afterwards.  The backend reads the variable the same way
+    // (unset or "0" is off), so this is the backend's answer rather than a restatement of the policy.
+    const char * f16acc_env = getenv("STRATA_VK_F16ACC");
+    const bool   f16acc_on  = f16acc_env != nullptr && std::strcmp(f16acc_env, "0") != 0;
     logf("[strata-vk] policy: fp32 shaders %s, int-dot %s, cooperative matrix %s\n",
          policy.fp32_shaders ? "on" : "off", policy.int_dot_off ? "off" : "on",
-         policy.coop_f16acc ? "f16-accumulate" : "off");
+         f16acc_on ? "f16-accumulate" : "off");
 }
 
 // Everything the engine decides from the model header, in one metadata pass: whether the prefill is a dense mat-mul
@@ -307,6 +327,48 @@ AffinityPlan plan_affinity(int perf_cap) {
     return plan;
 }
 
+// The pool the CPU backend runs the graph with. It is the big-core class alone, minus one core, and both halves are measured:
+// every node of every decode step opens and closes a barrier, so a heterogeneous pool pays its slowest core on each of them, and
+// the six 3072 MHz cores cost more at the barrier than they return in work; and with a worker on every core of the class the
+// engine's own main thread and the OS contend with the pool and the barrier skews again (12 workers 10.73 tok/s, spread 10%;
+// 11 workers 11.65 tok/s, spread 2%).  `want_threads` is --threads, 0 meaning "the class minus one"; the result is clamped to
+// the mask either way. STRATA_CPU_MASK (a hex affinity mask) and STRATA_CPU_THREADS override both, for measurement.
+AffinityPlan plan_cpu_affinity(int want_threads) {
+    AffinityPlan plan;
+    const int total = (int) std::thread::hardware_concurrency();
+    if (total <= 0) return plan;
+
+    if (const char * env = std::getenv("STRATA_CPU_MASK")) {
+        const unsigned long long mask = std::strtoull(env, nullptr, 16);
+        for (int i = 0; i < total && i < 64; ++i) {
+            if (mask & (1ull << i)) plan.cpus.push_back(i);
+        }
+    }
+    if (plan.cpus.empty()) {
+        const std::vector<int> mhz = core_clocks(total);
+        const int top = *std::max_element(mhz.begin(), mhz.end());
+        for (int i = 0; i < total; ++i) {
+            if (top > 0 && mhz[(size_t) i] >= top) plan.cpus.push_back(i);
+        }
+        if (plan.cpus.empty() || (int) plan.cpus.size() == total) {   // topology unknown: no pinning, every core
+            plan.cpus.clear();
+            for (int i = 0; i < total; ++i) plan.cpus.push_back(i);
+        }
+    }
+
+    // Asking for more threads than the class has means asking for the little cores as well, which is the old behaviour and still
+    // the right one for a CPU prefill; the default (want_threads == 0) stays inside the class.
+    if (want_threads > (int) plan.cpus.size()) {
+        plan.cpus.clear();
+        for (int i = 0; i < total; ++i) plan.cpus.push_back(i);
+    }
+
+    int n = want_threads > 0 ? want_threads : (int) plan.cpus.size() - 1;
+    if (const char * env = std::getenv("STRATA_CPU_THREADS")) n = std::atoi(env);
+    plan.n_threads = std::max(1, std::min(n, (int) plan.cpus.size()));
+    return plan;
+}
+
 ModelFacts read_model_facts(const std::string & path) {
     ModelFacts f;
     gguf_init_params gp = { /*no_alloc*/ true, /*ctx*/ nullptr };
@@ -337,7 +399,7 @@ ModelFacts read_model_facts(const std::string & path) {
             // read from the file per token, not resident
             f.disk_bytes += bytes;
         } else {
-            f.dense_bytes += bytes;
+            (void) bytes;   // dense tensors need no accounting: nothing reads their total
         }
         switch (gguf_get_tensor_type(g, i)) {
             case GGML_TYPE_Q4_0: case GGML_TYPE_Q4_1: case GGML_TYPE_Q5_0: case GGML_TYPE_Q5_1:

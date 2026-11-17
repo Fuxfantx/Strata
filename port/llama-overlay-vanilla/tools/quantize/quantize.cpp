@@ -150,8 +150,6 @@ static void usage(const char * executable) {
     printf("                                      this is an advanced option to selectively quantize tensors. may be specified multiple times.\n");
     printf("                                      example: --tensor-type attn_q=q8_0\n");
     printf("  --tensor-type-file tensor_types.txt\n");
-    printf("  --only-tensors REGEX\n");
-    printf("                                      write only tensors whose name matches REGEX (default: all)\n");
     printf("                                      list of tensors to quantize to a specific ggml_type\n");
     printf("                                      this is an advanced option to selectively quantize a long list of tensors.\n");
     printf("                                      the file should use the same format as above, separated by spaces or newlines.\n");
@@ -440,11 +438,6 @@ int llama_quantize(int argc, char ** argv) {
             if (arg_idx == argc-1 || !parse_tensor_type_file(argv[++arg_idx], tensor_type_opts)) {
                 usage(argv[0]);
             }
-        } else if (strcmp(argv[arg_idx], "--only-tensors") == 0) {
-            if (arg_idx == argc - 1) {
-                usage(argv[0]);
-            }
-            params.only_tensors = argv[++arg_idx];
         } else if (strcmp(argv[arg_idx], "--prune-layers") == 0) {
             if (arg_idx == argc-1 || !parse_layer_prune(argv[++arg_idx], prune_layers)) {
                 usage(argv[0]);

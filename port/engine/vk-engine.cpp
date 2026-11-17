@@ -43,10 +43,12 @@ void Engine::mtp_prime(const llama_token * toks, int n, int pos0) {
 
 
 void Engine::trim_to_common_prefix(llama_memory_t mem, const std::vector<llama_token> & ids) {
-    int common = (int) std::min(kv_tokens_.size(), ids.size());
-    int n = 0;
-    while (n < common && kv_tokens_[n] == ids[n]) ++n;
-    common = n;
+    // A chat turn appends, so the first mismatch sits at the end of the shorter array: walk backwards and stop in a few
+    // tokens instead of touching the whole cached prefix on every turn.
+    const int common_max = (int) std::min(kv_tokens_.size(), ids.size());
+    int n = common_max;
+    while (n > 0 && kv_tokens_[n - 1] == ids[n - 1]) --n;
+    int common = n;
 
     if (common < (int) kv_tokens_.size()) {
         // The prompt diverges (an edited message, a new conversation): drop what follows the shared prefix.  A
@@ -72,6 +74,7 @@ void Engine::trim_to_common_prefix(llama_memory_t mem, const std::vector<llama_t
 }
 
 bool Engine::decode(const llama_token * toks, int n, int pos0, bool want_logits) {
+    if (n > batch_cap_) { logf("[strata-vk] batch of %d exceeds the %d rows allocated; refusing\n", n, batch_cap_); return false; }
     for (int i = 0; i < n; ++i) {
         batch_.token[i]     = toks[i];
         batch_.pos[i]       = pos0 + i;
@@ -89,6 +92,7 @@ bool Engine::decode(const llama_token * toks, int n, int pos0, bool want_logits)
 }
 
 bool Engine::decode_all(const llama_token * toks, int n, int pos0) {
+    if (n > batch_cap_) { logf("[strata-vk] batch of %d exceeds the %d rows allocated; refusing\n", n, batch_cap_); return false; }
     for (int i = 0; i < n; ++i) {
         batch_.token[i]     = toks[i];
         batch_.pos[i]       = pos0 + i;
@@ -105,8 +109,311 @@ bool Engine::decode_all(const llama_token * toks, int n, int pos0) {
     return true;
 }
 
-// The last n-1 tokens plus the token just sampled form the pattern; an earlier occurrence of it gives the continuation
-// to draft.  The occurrence is found through an index built as the history grows, so the cost is one hash and one map
+namespace {
+int argmax_logits(const float * lg, int n) {
+    int best = 0;
+    float bv = lg[0];
+    for (int i = 1; i < n; ++i) {
+        if (lg[i] > bv) { bv = lg[i]; best = i; }
+    }
+    return best;
+}
+} // namespace
+
+void Engine::debug_logits_row(const char * tag, int32_t idx) const {
+    const int nv = llama_vocab_n_tokens(vocab_);
+    const float * lg = llama_get_logits_ith(ctx_, idx);
+    if (lg == nullptr) {
+        logf("[strata-vk] %s: index %d has no logits\n", tag, (int) idx);
+        return;
+    }
+    const int b0 = argmax_logits(lg, nv);
+    float second = -1e30f;
+    int b1 = -1;
+    for (int i = 0; i < nv; ++i) {
+        if (i != b0 && lg[i] > second) { second = lg[i]; b1 = i; }
+    }
+    logf("[strata-vk] %s: index %d -> top %d (%.3f), then %d (%.3f)\n", tag, (int) idx, b0, (double) lg[b0],
+         b1, (double) second);
+}
+
+// Decode N sequences in one batch.  The point is the arithmetic of a bandwidth-bound step: the dense weights are read once
+// for the whole batch, so N tokens can cost little more than one.  Only the experts scale with the batch, and they are the
+// smaller half of a token's traffic.
+Engine::SlotStats Engine::bench_slots(const std::vector<llama_token> & prompt, int steps, int slots) {
+    SlotStats out;
+    out.slots = slots;
+    const int P = (int) prompt.size();
+    if (!ready() || slots < 1 || steps < 1 || P < 1) return out;
+    if ((int) llama_n_seq_max(ctx_) < slots) {
+        logf("[strata-vk] slots: %d asked for, the context holds %d sequences\n", slots, (int) llama_n_seq_max(ctx_));
+        return out;
+    }
+    // Each sequence keeps its own copy of the prompt and its own recurrent state, so the cache needs slots * (P + steps).
+    const long long need = (long long) (P + steps + 1) * slots;
+    if (need > (long long) n_ctx_) {
+        logf("[strata-vk] slots: %d sequences of %d tokens need %lld cache cells, the context has %d\n",
+             slots, P + steps + 1, need, n_ctx_);
+        return out;
+    }
+
+    llama_memory_clear(llama_get_memory(ctx_), true);
+    kv_tokens_.clear();
+
+    // Prefill one sequence at a time.  It sits outside the timed window, and it leaves each sequence's last-token logits at
+    // a batch index that is known here.
+    const int nv = llama_vocab_n_tokens(vocab_);
+    std::vector<llama_token> cur((size_t) slots, 0);
+    for (int s = 0; s < slots; ++s) {
+        int last_rows = 0;
+        for (int off = 0; off < P; off += batch_cap_) {
+            const int n = std::min(batch_cap_, P - off);
+            for (int i = 0; i < n; ++i) {
+                batch_.token[i]     = prompt[(size_t) off + i];
+                batch_.pos[i]       = off + i;
+                batch_.n_seq_id[i]  = 1;
+                batch_.seq_id[i][0] = s;
+                batch_.logits[i]    = (off + i == P - 1) ? 1 : 0;
+            }
+            batch_.n_tokens = n;
+            if (llama_decode(ctx_, batch_) != 0) {
+                logf("[strata-vk] slots: prefill of sequence %d failed at %d/%d\n", s, off + n, P);
+                return out;
+            }
+            last_rows = n;
+        }
+        const float * lg = llama_get_logits_ith(ctx_, last_rows - 1);
+        if (lg == nullptr) { logf("[strata-vk] slots: no logits for sequence %d\n", s); return out; }
+        cur[(size_t) s] = (llama_token) argmax_logits(lg, nv);
+    }
+
+    // The measured loop: one row per sequence, all rows in one batch.
+    const Clock::time_point t0 = Clock::now();
+    out.t0_epoch = epoch_seconds();
+    for (int t = 0; t < steps; ++t) {
+        for (int s = 0; s < slots; ++s) {
+            batch_.token[s]     = cur[(size_t) s];
+            batch_.pos[s]       = P + t;
+            batch_.n_seq_id[s]  = 1;
+            batch_.seq_id[s][0] = s;
+            batch_.logits[s]    = 1;
+        }
+        batch_.n_tokens = slots;
+        if (llama_decode(ctx_, batch_) != 0) {
+            logf("[strata-vk] slots: decode failed at step %d of %d\n", t, steps);
+            return out;
+        }
+        for (int s = 0; s < slots; ++s) {
+            const float * lg = llama_get_logits_ith(ctx_, s);
+            if (lg == nullptr) { logf("[strata-vk] slots: no logits at step %d\n", t); return out; }
+            cur[(size_t) s] = (llama_token) argmax_logits(lg, nv);
+        }
+        out.steps   = t + 1;
+        out.tokens += slots;
+    }
+    out.ms = ms_since(t0);
+    out.t1_epoch = epoch_seconds();
+    return out;
+}
+
+int Engine::slot_active() const {
+    int n = 0;
+    for (const SlotState & s : slot_st_) {
+        if (s.active) ++n;
+    }
+    return n;
+}
+
+// Admit one request into `slot`: check it fits, drop whatever the slot held, and keep its prompt for the chunk reader.
+// Nothing is decoded here, so the caller can run a step for the slots already in flight between two chunks.
+Engine::SlotAdmit Engine::slot_begin(int slot, const std::vector<llama_token> & ids, int max_new,
+                                     const std::string & keys) {
+    SlotAdmit out;
+    if (slot < 0 || slot >= (int) slot_st_.size()) { out.error = "no such free slot"; return out; }
+    SlotState & s = slot_st_[(size_t) slot];
+    if (s.active || s.prefilling || s.ready) { out.error = "slot busy"; return out; }
+    if (ids.empty()) { out.error = "empty prompt"; return out; }
+    if (max_new < 1) { out.error = "a bad max_new"; return out; }
+    // The slot owns n_ctx/n_seq_max cells, so a request that would not fit is refused before anything is written: a
+    // prompt that silently lost its tail would answer from the wrong text.
+    if ((long long) ids.size() + max_new + 1 > (long long) slot_ctx_) {
+        out.error = "prompt + max_new does not fit the slot (" + std::to_string(ids.size()) + " + " +
+                    std::to_string(max_new) + " > " + std::to_string(slot_ctx_) + ")";
+        return out;
+    }
+
+    llama_memory_seq_rm(llama_get_memory(ctx_), slot, -1, -1);
+    s.prompt      = ids;
+    s.prefill_off = 0;
+    s.prefilling  = true;
+    s.ready       = false;
+    s.cancel      = false;
+    s.max_new     = max_new;
+    s.pp_t0       = Clock::now();
+    s.admit       = SlotAdmit{};
+    s.admit.error.clear();
+
+    bool greedy = false;
+    if (s.smpl != nullptr) llama_sampler_free(s.smpl);
+    s.smpl = make_sampler(keys, &greedy);
+    out.ok = true;
+    return out;
+}
+
+// Read the next `chunk` prompt tokens into the slot's sequence.  The last row of the last chunk is where the admission's
+// first token comes from, so that is the only row asked for logits.
+int Engine::slot_prefill_chunk(int slot, int chunk) {
+    if (slot < 0 || slot >= (int) slot_st_.size()) return 0;
+    SlotState & s = slot_st_[(size_t) slot];
+    if (!s.prefilling) return 0;
+    const int total = (int) s.prompt.size();
+    const int n = std::min({chunk, batch_cap_, total - s.prefill_off});
+    if (n <= 0) {
+        s.prefilling = false;
+        s.ready = true;
+        return 0;
+    }
+    for (int i = 0; i < n; ++i) {
+        const int at = s.prefill_off + i;
+        batch_.token[i]     = s.prompt[(size_t) at];
+        batch_.pos[i]       = at;
+        batch_.n_seq_id[i]  = 1;
+        batch_.seq_id[i][0] = slot;
+        batch_.logits[i]    = (at == total - 1) ? 1 : 0;
+    }
+    batch_.n_tokens = n;
+    if (llama_decode(ctx_, batch_) != 0) {
+        s.admit.error = "the prompt did not decode";
+        s.admit.ok = false;
+        llama_memory_seq_rm(llama_get_memory(ctx_), slot, -1, -1);
+        s.prefilling = false;
+        s.prompt.clear();
+        if (s.smpl != nullptr) llama_sampler_free(s.smpl);
+        s.smpl = nullptr;
+        return 0;
+    }
+    s.prefill_off += n;
+    if (s.prefill_off < total) return n;
+
+    // The prompt is in: sample the token the admission answers with, which counts towards `max_new`.  `-1` is the last
+    // row that asked for logits, which is the one that completes the prompt: after a chunk that asked for none, the
+    // output rows of this decode hold only this one.  The prompt is not fed to the sampler, exactly as the solo path
+    // does not feed it: `llama_sampler_sample` accepts what it returns, so that is the whole window either path builds.
+    s.admit.pp_ms = ms_since(s.pp_t0);
+    static const bool admit_dbg = std::getenv("STRATA_VK_ADMIT_DEBUG") != nullptr;
+    if (admit_dbg) {
+        char tag[64];
+        std::snprintf(tag, sizeof(tag), "slot %d row n-1", slot);
+        debug_logits_row(tag, n - 1);
+        std::snprintf(tag, sizeof(tag), "slot %d row -1", slot);
+        debug_logits_row(tag, -1);
+    }
+    s.admit.first = llama_sampler_sample(s.smpl, ctx_, n - 1);
+    if (s.admit.first == 0) {
+        // A row that never got its logits reads as all zeros, and a greedy sample of zeros is token 0.  Say so rather
+        // than answer from an empty row.
+        logf("[strata-vk] slot %d: the admission row read as token 0 (logits %s)\n", slot,
+             llama_get_logits_ith(ctx_, n - 1) != nullptr ? "present" : "missing");
+    }
+    s.admit.eog = !ignore_eog_ && llama_vocab_is_eog(vocab_, s.admit.first);
+    s.admit.continues = !s.admit.eog && s.max_new > 1;
+    s.admit.ok = true;
+    s.produced = 1;
+    s.pos      = total;
+    s.next     = s.admit.first;
+    s.prefilling = false;
+    s.ready      = true;
+    s.prompt.clear();
+    return n;
+}
+
+// Hand the caller the `T`/`DONE`/`BADM` fields and put the slot into (or out of) the batch.
+bool Engine::slot_admit_report(int slot, SlotAdmit & out) {
+    if (slot < 0 || slot >= (int) slot_st_.size()) return false;
+    SlotState & s = slot_st_[(size_t) slot];
+    if (!s.ready) {
+        out = s.admit;                    // a failed chunk leaves its `error` here
+        s.ready = false;
+        return false;
+    }
+    out = s.admit;
+    // `next` is the token the slot will decode in its first step, so it is by construction the token this admission
+    // answers with: reading it from there keeps the `T` line and the batch in step whatever happened above.
+    out.first = s.next;
+    s.ready = false;
+    s.active = out.continues;
+    if (!out.continues && s.smpl != nullptr) {
+        llama_sampler_free(s.smpl);
+        s.smpl = nullptr;
+    }
+    return out.ok;
+}
+
+void Engine::slot_stop(int slot) {
+    if (slot >= 0 && slot < (int) slot_st_.size()) slot_st_[(size_t) slot].cancel = true;
+}
+
+// One token for every active slot, in a single batch: the dense weights are read once for the whole batch, which is the
+// point of running them together at all (PERFORMANCE.md section 20.45).
+void Engine::slot_step(std::vector<SlotEvent> & out) {
+    out.clear();
+    std::vector<int> live;
+    for (int i = 0; i < (int) slot_st_.size(); ++i) {
+        if (slot_st_[(size_t) i].active) live.push_back(i);
+    }
+    if (live.empty()) return;
+    for (size_t k = 0; k < live.size(); ++k) {
+        const SlotState & s = slot_st_[(size_t) live[k]];
+        batch_.token[k]     = s.next;
+        batch_.pos[k]       = s.pos;
+        batch_.n_seq_id[k]  = 1;
+        batch_.seq_id[k][0] = live[k];
+        batch_.logits[k]    = 1;
+    }
+    batch_.n_tokens = (int) live.size();
+    const bool ok = llama_decode(ctx_, batch_) == 0;
+    for (size_t k = 0; k < live.size(); ++k) {
+        const int slot = live[k];
+        SlotState & s = slot_st_[(size_t) slot];
+        SlotEvent e;
+        e.slot = slot;
+        // A failed step ends every slot in it: the alternative is to keep stepping on a cache that may not have moved,
+        // which would put the same token in twice.
+        const bool stop_now = !ok || s.cancel || s.produced >= s.max_new;
+        if (stop_now) {
+            e.done = true;
+            e.produced = s.produced;
+            e.eog = !ignore_eog_ && llama_vocab_is_eog(vocab_, s.next);
+            s.active = false;
+            s.cancel = false;
+            if (s.smpl != nullptr) llama_sampler_free(s.smpl);
+            s.smpl = nullptr;
+            out.push_back(e);
+            continue;
+        }
+        // `llama_sampler_sample` already accepted what it returned: accepting again would double the token in the
+        // penalties window and make a slot answer differently from a solo run on the same request.
+        s.next = llama_sampler_sample(s.smpl, ctx_, (int32_t) k);
+        ++s.pos;
+        ++s.produced;
+        e.tok = s.next;
+        e.fresh = true;
+        e.produced = s.produced;
+        e.eog = !ignore_eog_ && llama_vocab_is_eog(vocab_, s.next);
+        // An end-of-generation token is emitted, then the slot ends on the *next* step, exactly as the solo path prints
+        // the stop token and stops.  `produced >= max_new` is checked here so the last token is not followed by a decode.
+        if (e.eog || s.produced >= s.max_new) {
+            e.done = true;
+            s.active = false;
+            s.cancel = false;
+            if (s.smpl != nullptr) llama_sampler_free(s.smpl);
+            s.smpl = nullptr;
+        }
+        out.push_back(e);
+    }
+}
+
+// The last n-1 tokens plus the token just sampled form the pattern; an earlier occurrence of it gives the continuation// to draft.  The occurrence is found through an index built as the history grows, so the cost is one hash and one map
 // lookup per token instead of a backward scan over the whole conversation.
 namespace {
 uint64_t ngram_hash(const llama_token * t, size_t n) {
@@ -239,6 +546,11 @@ bool Engine::verify_draft(llama_sampler * smpl, llama_token cur, const std::vect
 }
 
 // Strata's per-request sampling keys (serve/server.py's `sampling_keys`) -> a llama.cpp sampler chain.
+//
+// One chain per call, owned by the caller.  It used to be cached by key, which cannot work: the solo path frees what it
+// is given, so the cache held a freed pointer for the next request, and the slots all shared one chain and freed it once
+// each.  A penalties chain also carries the request's window, which no two requests may share.  What the cache saved was
+// one vocabulary-sized allocation per request.
 llama_sampler * Engine::make_sampler(const std::string & keys, bool * greedy) const {
     double temperature = -1.0, top_p = -1.0, min_p = -1.0;
     int    top_k = -1;
@@ -271,7 +583,7 @@ llama_sampler * Engine::make_sampler(const std::string & keys, bool * greedy) co
     }
 
     llama_sampler_chain_params sp = llama_sampler_chain_default_params();
-    sp.no_perf = false;
+    sp.no_perf = true;   // nothing reads llama_perf_sampler here; the clock reads are pure cost
     llama_sampler * chain = llama_sampler_chain_init(sp);
     if (p_repeat != 1.0 || p_freq != 0.0 || p_present != 0.0) {
         llama_sampler_chain_add(chain, llama_sampler_init_penalties(

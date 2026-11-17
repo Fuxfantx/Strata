@@ -1,9 +1,13 @@
 # The CPU + GPU + NPU path, as measured
 
-> The token rates in this note are the ablations taken **before** the cooperative-matrix default landed (prefill 148.9 for the
-> 35B-A3B, 77.9 for the 27B, and so on). The same commands now measure 198.9 / 163.9 / 65.3 / 4 301 prefill and 38.96 / 7.30 /
-> 3.90 / 126.5 decode - `PORT-STATE.md` has the current table. What this note establishes - that the CPU, GPU and NPU split
-> the work the way it describes - is unchanged.
+> **Status (2026-11-18).** A measurement record from the hybrid investigation. Its verdicts are in `PERFORMANCE.md`
+> §4: layer splitting, `--cpu-moe` and cross-engine token-level parallelism all lost on this machine (the two-process
+> shape gains 33% throughput at 2.44x the energy per token), and the NPU contributes nothing (no DSP session opens).
+> The token rates below are the ablations taken **before** two later changes: the cooperative-matrix default, which was
+> withdrawn for being numerically wrong, and the epilogue fixes in the CPU port. The same commands now measure
+> 151.7 / 77.9 / 17.4 / 2 826 prefill and 37.8 / 7.0 / 3.3 / 118.9 decode on the shipped default (correct kernels,
+> `PERFORMANCE.md` §1). What the note establishes - what a token is made of and how the three engines divide the work -
+> is unchanged.
 
 A token runs on the Adreno. The other two engines have one job each that pays, and one role each that does not. This note
 is the measurement behind that sentence, so the next attempt starts from numbers instead of from the idea.
@@ -217,6 +221,28 @@ device. That is the number item (9a) is built on: one GPU slot plus one CPU slot
 Cost to keep in view: a second model instance is a second copy of the weights. The packs that fit do (27B 14.5 GiB, MoE 18.4 GiB,
 tiny), the 54-62 GiB packs do not, and on this UMA part "device memory" is the same RAM, so the copy is real RAM either way.
 
+### The oversized packs *can* pay it, because a mapped pack is shared page cache
+
+The paragraph above is wrong for the packs that are loaded with `--load-mode mmap` (every pack larger than RAM), and it is wrong
+in the one direction that matters: two processes that map the *same file* share its pages. There is no second copy — there is one
+page cache and two readers of it. Measured on Gyro-S (54.5 GiB pack, 47.6 GiB machine, 38 GiB free), `--bench-tg 32` each:
+
+| Gyro-S, one token stream | decode |
+| --- | --- |
+| GPU alone | 9.14 tok/s |
+| CPU alone (12 big cores) | 8.10 tok/s |
+| **both at once, one shared map** | **9.34 + 3.40 = 12.74 tok/s (+39% against the GPU alone)** |
+
+So the aggregate shape is the same +39% the 35B-A3B showed, on the pack that was said to be unable to pay for it. What it does cost
+is memory: free physical memory bottomed out at **0.7 GiB** during the pair, against 30 GiB for the CPU engine alone, and that is
+why the CPU side falls to 3.4 tok/s — it is not losing to the GPU, it is losing to the page fault rate. The GPU is unaffected
+(9.34 against 9.14: it is latency-bound, not bandwidth-bound, so the other process's faults do not touch it).
+
+⇒ Item (9a) is available on the oversized packs after all. The gate is `apps/host/server/native-pool.mjs` (which is not in this
+tree — `HYBRID.md`'s earlier claim that it was "built, tested, 6 cases" does not hold at this commit, and building it is the work
+that remains). The rule it needs is not "does the second copy fit" but **"is the pack mapped?"** — if it is, a second worker costs
+page cache pressure, not RAM. The honest starting numbers are the row above: aggregate +39%, second request ~3.4 tok/s.
+
 ## What item (9a) actually needs: a concurrent protocol, not a second backend
 
 The measurement says a GPU slot plus a CPU slot is worth +37% aggregate, but the engine cannot expose it today, and the reason
@@ -276,6 +302,14 @@ tested without an engine (pps/host/tests/native-pool.test.mjs, 6 cases):
 
 The plumbing - starting the second engine and routing a request to whichever worker is free - is the next piece; it needs no
 protocol change because each request still goes to one engine.
+
+> **Correction (2026-11-18, `PERFORMANCE.md` §4).** `native-pool.mjs` is not in this tree at this commit, and the rule
+> above is wrong in one place: a 54-62 GiB pack *can* have a second worker, because a pack loaded with `--load-mode mmap` is one
+> page cache shared by both processes, not two copies (measured: GPU alone 9.14, CPU alone 8.10, both at once 9.34 + 3.40 =
+> 12.74, +39%). What already exists here is the rest of route A, in Python: `serve/replicas.py` has `ReplicaEngine`, `Router`,
+> `replica_cfg`, `gpu_groups`, and the server has `--replicas N` and per-slot replica routing. Its partition dimension is the GPU
+> *card*, so on a one-card machine `replicas` yields nothing. The delta is one controlled extension of `gpu_groups` /
+> `replica_cfg` to admit a replica with no cards that runs `--gpu cpu` - not a new module, and not a protocol change.
 
 ### Item (9b): what a layer split needs (a failed first attempt, recorded)
 

@@ -1486,24 +1486,29 @@ void ggml_cpu_tq_init(void) {
 // Shared TQ x Q8_0 kernel. Every trellis step t (0..31) of a 128-weight block yields
 // weights 4t..4t+3 = ggml_tq_state_i16[4*state(t) ...], dotted in int32 against the
 // Q8_0 activations (Q8_0 block k covers steps 8k..8k+7). kb = 8 is TQ2_T's byte stream.
-// States: the stream is copied with its first 4 bytes repeated after it, so every
-// (circular) 16-bit window is one 32-bit little-endian read; same values as tqk_state.
-static inline void tq_states(const uint8_t * GGML_RESTRICT qs, int kb, uint32_t * GGML_RESTRICT st) {
+//
+// Four states at a time, straight out of the block's byte stream, which is copied once per block with its first 8 bytes
+// repeated after it (`buf`) so every window read is in range.  The offsets run backwards with t, so the window starts three
+// fields below t and the j-th field sits at bit (3 - j) * kb: the same values as a one-field read, with a quarter of the
+// iterations.  The caller consumes the four it gets before asking for the next four, so they live in registers instead of an
+// st[32] array that is written once and read once.  Measured neutral against that array (PERFORMANCE.md 6.4) and kept: it is
+// strictly fewer instructions, and it is the shape any change to this kernel has to start from.
+static inline void tq_state4(const uint8_t * GGML_RESTRICT qs, const uint8_t * GGML_RESTRICT buf, int kb, int t,
+                             uint32_t * GGML_RESTRICT st) {
     if (kb == 8) {
-        for (int t = 0; t < 32; ++t) {
-            st[t] = (((uint32_t) qs[(t + 31) & 31] << 8) | qs[t]) & TQ_STATE_MASK;
+        for (int j = 0; j < 4; ++j) {
+            const int u = t + j;
+            st[j] = (((uint32_t) qs[(u + 31) & 31] << 8) | qs[u]) & TQ_STATE_MASK;
         }
         return;
     }
-    const int nbytes = 4*kb;
-    uint8_t buf[4*8 + 4];
-    memcpy(buf, qs, nbytes);
-    memcpy(buf + nbytes, qs, 4);
-    for (int t = 0; t < 32; ++t) {
-        const uint32_t off = (uint32_t) (31 - t) * (uint32_t) kb;
-        const uint8_t * p = buf + (off >> 3);
-        const uint32_t w = (uint32_t) p[0] | ((uint32_t) p[1] << 8) | ((uint32_t) p[2] << 16);
-        st[t] = (w >> (off & 7)) & TQ_STATE_MASK;
+    const uint32_t off   = (uint32_t) (31 - t) * (uint32_t) kb;
+    const uint32_t base  = off - 3u * (uint32_t) kb;
+    uint64_t w = 0;
+    memcpy(&w, buf + (base >> 3), sizeof(w));
+    w >>= (base & 7);
+    for (int j = 0; j < 4; ++j) {
+        st[j] = (uint32_t) ((w >> ((3 - j) * kb)) & TQ_STATE_MASK);
     }
 }
 
@@ -1518,20 +1523,49 @@ static void ggml_vec_dot_tq_q8_0_impl(int n, float * GGML_RESTRICT s, const void
     const uint8_t    * GGML_RESTRICT x = vx;
     const block_q8_0 * GGML_RESTRICT y = vy;
 
+    const int nbytes = 4*kb;
+    uint8_t buf[4*8 + 8];
+
     float sumf = 0.0f;
 
     for (int i = 0; i < nb; i++, x += bsize) {
-        uint32_t st[32];
-        tq_states(x + sizeof(ggml_half), kb, st);
+        const uint8_t * GGML_RESTRICT qs = x + sizeof(ggml_half);
+        if (kb != 8) {
+            memcpy(buf, qs, (size_t) nbytes);
+            memcpy(buf + nbytes, qs, 8);
+        }
         float sumb = 0.0f;
         for (int k = 0; k < QK_TQK/QK8_0; k++) {
             const block_q8_0 * GGML_RESTRICT yb = &y[i*(QK_TQK/QK8_0) + k];
+            // The eight states of this Q8_0 block, extracted first and then consumed: eight uint32 live in registers here.
+            uint32_t st[8];
+            tq_state4(qs, buf, kb, 8*k,     st);
+            tq_state4(qs, buf, kb, 8*k + 4, st + 4);
             int32_t acc = 0;
-            for (int t = 8*k; t < 8*k + 8; ++t) {
-                const int16_t * w = ggml_tq_state_i16 + 4*st[t];
-                const int8_t  * q = yb->qs + 4*(t - 8*k);
+#if defined(__ARM_NEON)   // STRATA_TQ_NEON
+            // Two steps at a time: eight int16 weights against eight consecutive int8 activations, one vmlal_s16.  The lookups
+            // stay scalar (NEON has no gather) but the arithmetic runs eight lanes wide.  Integer addition is exact, so acc is
+            // bit-identical to the scalar loop below.
+            {
+                int32x4_t vacc = vdupq_n_s32(0);
+                for (int p = 0; p < 4; ++p) {
+                    // pair p is steps 2p and 2p+1, i.e. activations 8p..8p+7 of this Q8_0 block
+                    const int16_t * w0 = ggml_tq_state_i16 + 4*st[2*p];
+                    const int16_t * w1 = ggml_tq_state_i16 + 4*st[2*p + 1];
+                    const int16x8_t w8 = vcombine_s16(vld1_s16(w0), vld1_s16(w1));
+                    const int16x8_t q16 = vmovl_s8(vld1_s8(yb->qs + 8*p));
+                    vacc = vmlal_s16(vacc, vget_low_s16(w8),  vget_low_s16(q16));
+                    vacc = vmlal_s16(vacc, vget_high_s16(w8), vget_high_s16(q16));
+                }
+                acc = vaddvq_s32(vacc);
+            }
+#else
+            for (int p = 0; p < 8; ++p) {
+                const int16_t * w = ggml_tq_state_i16 + 4*st[p];
+                const int8_t  * q = yb->qs + 4*p;
                 acc += w[0]*q[0] + w[1]*q[1] + w[2]*q[2] + w[3]*q[3];
             }
+#endif
             sumb += GGML_CPU_FP16_TO_FP32(yb->d) * (float) acc;
         }
         sumf += GGML_CPU_FP16_TO_FP32(*(const ggml_half *) x) * sumb;
