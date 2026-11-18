@@ -35,7 +35,7 @@ build\bin\strata-vk.exe --gpu cpu --native D:\models\pack.gguf --tokens 9707 --n
 | `--tokens a,b,c` / `--prompt TEXT` | 输入（token 路径 / 文本路径） |
 | `-c N` / `--ctx-size` | 上下文（默认 32768） |
 | `--kv f16\|q8_0\|q4_0` | KV 类型（实测对 decode 无影响） |
-| `--shader-family auto\|f16\|fp32` | Vulkan 的 shader 家族。**这是一个真实的交换**：f16（默认）decode 10.7 / prefill pp512 19.2；fp32 decode 5.5 / prefill **46.1**。而且 fp32 家族在 35B 的 16-token 模板化 prompt 上与 CPU 后端逐 token 相同，f16 家族在第 14 个 token 上因一次并列翻转分叉（两者 logits 相关性都是 0.999，`PERFORMANCE.md` §1）。长文档、短回复用 fp32；交互式用默认 |
+| `--shader-family auto\|f16\|fp32` | **诊断开关，默认路径已经不需要它。** 2026-11-18 之后，int-dot 的 **mat-mat** 固定取自 fp32 模块，mat-vec 与 elementwise 留在 f16 模块，于是默认同时拿到 prefill 49.80 与 decode 10.12（成对 3 轮中位数）。`fp32` 现在只把 elementwise 也换成 fp32：decode 5.5、prefill 46.63，两头都更差。**别再用它换 prefill**（`PERFORMANCE.md` §1） |
 | `--prefill N` | prefill 分块（默认 1024；此项带来 pp512 +25%） |
 | `--npu off\|dense\|split` | NPU 布置（本机被守卫硬关闭，见 BACKEND-OPTIONS.md） |
 | `--perf-cap 1..100` | 限速（默认 100）；`--gpu cpu` 时不生效，见下面的 `-t` |
@@ -73,8 +73,9 @@ build\bin\strata-vk.exe --gpu cpu --native D:\models\pack.gguf --tokens 9707 --n
 | `serve/server.py --replicas-cpu N` | 在卡片副本旁边再加 N 个 **CPU 后端**副本（一张卡的机器唯一能有的第二个 worker）。实测 +39% 聚合（`PERFORMANCE.md` §4），代价是超大包上第二个请求慢。端到端验证脚本：`python port/tools/e2e-replicas.py --exe build\bin\strata-vk.exe --model M.gguf --tokenizer T --out-json X --cpu-via-cli` |
 | `python port/tools/gguf-tokenizer.py M.gguf --out DIR` | 从包元数据造出 `serve/server.py` 要的 tokenizer 目录，并用 `strata_tokenizer` 做编码往返验证。**vocab 必须来自被服务的那个模型**；`pre` 只支持 `qwen35` / `deepseek*` |
 | `python port/tools/two-serve.py EXE MODEL` | 按 `serve/replicas.py` 的写法同时起两个引擎（一个默认后端、一个 `--gpu cpu`），各发一个 GEN，断言两侧都 READY、都 DONE、token 数对得上。这是「CPU 副本」那条路的引擎侧契约检查（`PERFORMANCE.md` §4） |
-| `STRATA_VK_F16ACC=1` | 选 f16-accumulate 的 cooperative matrix。**默认已关闭**：它与 CPU logits 的相关性只有 0.02（27B/35B/Gyro-S 三个包都测了），输出是错的；打开只用于"只看形状"的基准（prefill 221 tok/s 那种读数就是它，`PERFORMANCE.md` §4.1） |
-| `STRATA_VK_F16=off` | 强制 fp32 shaders。**正确**且 prefill 快一倍（Gyro-S pp512 19.33 → 46.63 tok/s），代价是 decode 掉到一半（10.68 → 5.48 tok/s）：适合"长 prompt、短回复"，默认仍按模型自动选。同义的正式开关是 `--shader-family fp32` |
+| `STRATA_VK_F16ACC=1` | 选 f16-accumulate 的 cooperative matrix。**默认已关闭**：它与 CPU logits 的相关性只有 0.02（27B/35B/Gyro-S 三个包都测了），输出是错的；打开只用于"只看形状"的基准（prefill 221 tok/s 那种读数就是它，`PERFORMANCE.md` §4.1）。**2026-11-18 更正**：那个 0.02 来自一个零次循环的 tile（`PERFORMANCE.md` §4.4/§4.5），tile 修好之后这条开关**只建分组的（`MUL_MAT_ID`）管线**，该内核已被 oracle 认证正确（`-o MUL_MAT_ID -p type_a=q5_K`/`tqk6` 各 3/3），Gyro-S pp512 达 **145 tok/s**；但整模型仍非有限，原因在 dense 一侧的回落路径（§4.5 末），所以**还不能当默认** |
+| `STRATA_VK_F16ACC_DENSE=1` | 连同 dense 的 cooperative 管线一起创建。默认不建，因为 dense 那份 shader 会把 `-inf` 写进每个输出的第一个 BM tile（`PERFORMANCE.md` §4.5）；留着这个开关是给修 staging 的人做 A/B，不是给用户用的 |
+| `STRATA_VK_F16=off` | 强制整机 fp32 shaders（等价于 `--shader-family fp32`）。**它已经不是 prefill 的捷径**：默认路径把 fp32 只用在 int-dot 的 mat-mat 上，pp512 反而比它快（49.80 对 46.63）且 decode 不受影响（10.12 对 5.48）。留作诊断 |
 | `STRATA_VK_INT8_COOPMAT=1` | 让 Qualcomm 设备也创建 upstream 只给 AMD RDNA3/4 建的 **int8 cooperative MMQ** 管线（本机硬件有 64×64×32 的 Sint8→Sint32 矩阵核心，**int32 累加、精确**）。实测：oracle 在 q5_K/q6_K/q8_0 上 **0 失败**，但 Gyro-S pp512 16.18 → 15.62、tg16 10.37 → 10.31 —— **中性**，默认关（`PERFORMANCE.md` §4.2 与 §5-P3） |
 | `--dump-logits FILE` | 把第一次生成的首行 logits 写盘（fp32 词表长度）。与 `--gpu cpu` 配对就是后端等价性门禁（`USAGE.md` 第 5 节第 0 条，`PERFORMANCE.md` §4.1） |
 
@@ -97,6 +98,12 @@ build\bin\strata-vk.exe --native D:\models\pack.gguf --tokens 9707 --n 32
 # 2) 后端 oracle
 build\bin\test-backend-ops.exe -o MUL_MAT -b Vulkan0     # 期望 0 failures
 #    注意：它只覆盖默认管线；STRATA_VK_F16ACC=1 那条内核不进 oracle，所以第 0 条是它的唯一门禁
+
+# 2b) cooperative 内核的最小自检（不需要模型，秒级）。tile 退化时这一步是**全零**：
+#     `dev/cpu` 比值应落在 0.98-1.00；全零或 nmse 1.0 就是 MMA 循环没跑（PERFORMANCE.md §4.4/§4.5）
+$env:STRATA_VK_F16ACC='1'; build\bin\mm-probe.exe -b Vulkan0 -t q4_0 -m 512 -n 64 -k 512 --verify
+Remove-Item env:STRATA_VK_F16ACC
+#    已知：修好 tile 后这一步过，但整模型 `--dump-logits` 仍是 nan（形状/尾部闸门未补，§4.5）
 
 # 3) 文档与编码
 python port/tools/check-encoding.py        # 期望 0 damaged

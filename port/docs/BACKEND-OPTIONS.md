@@ -8,7 +8,7 @@ Every number here is measured on this machine; the method and the full tables ar
 
 | 后端 | 怎么选 | 当前状态（本机实测，`Gyro-S-TQ1_0`，正确内核） | 结论 |
 | --- | --- | --- | --- |
-| **Vulkan**（Adreno X2-90） | 默认，或 `--gpu vulkan` | decode 10.68 tok/s，prefill pp512 19.33（fp32 shaders 时 46.63） | 支持；prefill 优先时开 fp32 shaders |
+| **Vulkan**（Adreno X2-90） | 默认，或 `--gpu vulkan` | decode 10.12 tok/s，prefill pp512 **49.80** | 支持；**默认就是 prefill 优先且 decode 不变的配置**（2026-11-18） |
 | **CPU**（18×Oryon，i8mm） | `--gpu cpu` | decode **11.34**，prefill 21.06 | 支持；这台机器单流最快 |
 | **HTP**（Hexagon NPU） | `--npu dense` 等 | 能构建、能跑完，但每种放置都更慢（27B decode 4.1-4.7 对 7.3；35B 10-14 对 39） | 默认关闭 |
 | OpenCL（同硬件另一驱动） | 无 | 未测 | 不在计划内 |
@@ -24,7 +24,7 @@ Every number here is measured on this machine; the method and the full tables ar
 | 决策 | 规则 | 依据 |
 | --- | --- | --- |
 | int-dot（dp4a）mat-mat | 默认开；只有 `q2_0`-only 的包关掉（那个 dp4a fp16 shader 在多 token prefill 上会让驱动崩） | prefill 数倍 |
-| fp32 shaders | 稠密包默认开（int-dot mat-mat 快 2.2×）；MoE 包用 `--shader-family fp32` 换取 prefill（Gyro-S 46.1 对 19.2） | 27B pp512 74.5 → 165.5 |
+| fp32 shaders | **默认不再需要**：int-dot 的 **mat-mat** 已经固定取自 fp32 模块，而 mat-vec 与 elementwise 留在 f16 模块（2026-11-18，pp512 16.01 → 49.80、tg16 不变）。`--shader-family fp32` 现在只把 elementwise 也换成 fp32，因此是纯损失（decode 减半，prefill 还更慢） | Gyro-S pp512 49.80 对 16.01 |
 | flash attention | `n_ctx >= 4096` 且层数 >= 32 默认开；短上下文 decode −32%，所以由调用方决定 | 2048 上下文 4.5× prefill |
 | cooperative matrix f32-accumulate | 默认开（正确路径） | 与 CPU logits 相关性 0.999 |
 | cooperative matrix **f16**-accumulate | **默认关** | logits 相关性 0.02，输出错（`PERFORMANCE.md` §4.1） |
@@ -57,6 +57,20 @@ CPU 后端不是备胎：它是这台机器上单流最快的后端，且是 Vul
 
 **还剩的**：decode 的 96% 在两个 matmul 上，且都已跑到各自指令底；剩下的只有"更低的位宽/更快的解包"和线程亲和，
 不是排期问题。`-t 18`（全部核）在 decode 上更慢，只在 `--bench-pp` 时有意义。
+
+**线程数扫描（2026-11-18，`--gpu cpu --tokens 9707 --n 16`，同一二进制）** —— 默认的 11 线程已经是最优，
+"per-op-class 线程数"这条假设就此关闭：
+
+| `-t` | 线程落在哪些核 | decode |
+| --- | --- | --- |
+| 默认（11） | 大核类的 12 个核里的 11 个 | **10.7 tok/s**（steady 10.8） |
+| 11 | 同上（显式指定与默认等价） | 10.7 |
+| 12 | 大核类全部 12 个 | 10.4（−3%） |
+| 13 | 全部 18 个核 | 9.7（−9%） |
+
+12 个核就已开始掉，13 个（放进小核类）掉 9%，与"异构池在每个算子的屏障上按最慢的核收钱"一致。
+绝对读数注意：同一二进制同一天的 CPU decode 在 **10.4-11.3** 之间漂移，跨时段比较没有意义。
+
 
 ## 4. HTP（Hexagon NPU）
 

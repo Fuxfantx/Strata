@@ -622,18 +622,32 @@ llama_model_loader::llama_model_loader(
         files.emplace_back(new llama_file(fname.c_str(), "rb", use_direct_io));
         contexts.emplace_back(ctx);
 
+        // A companion pack carries strata.companion = true in its own header and is passed as an extra file after
+        // the base; its tensors then replace the base pack's same-named ones, which is what lets a requantised dense
+        // group be tried without rewriting the whole pack (port/docs/PERFORMANCE.md section 5.0.1).  The marker is
+        // required rather than inferred from file order, so a duplicate inside the base pack is still an error.
+        const int  companion_key = gguf_find_key(metadata, "strata.companion");
+        const bool companion     = companion_key >= 0 && gguf_get_val_bool(metadata, companion_key);
+
         // Save tensors data offset of the main file.
         // For subsidiary files, `meta` tensor data offset must not be used,
         // so we build a unified tensors index for weights.
         for (ggml_tensor * cur = ggml_get_first_tensor(ctx); cur; cur = ggml_get_next_tensor(ctx, cur)) {
             std::string tensor_name = std::string(cur->name);
-            // make sure there is no duplicated tensor names
-            if (weights_map.find(tensor_name) != weights_map.end()) {
-                throw std::runtime_error(format("invalid model: tensor '%s' is duplicated", ggml_get_name(cur)));
+            auto existing = weights_map.find(tensor_name);
+            if (existing != weights_map.end()) {
+                if (!companion) {
+                    throw std::runtime_error(format("invalid model: tensor '%s' is duplicated", ggml_get_name(cur)));
+                }
+                // a companion replaces the base pack's tensor, so the totals follow it
+                n_elements -= ggml_nelements(existing->second.tensor);
+                n_bytes    -= ggml_nbytes(existing->second.tensor);
+                weights_map.erase(existing);
             }
             n_elements += ggml_nelements(cur);
             n_bytes    += ggml_nbytes(cur);
-            weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur));
+            weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0,
+                                                                 metadata, cur));
         }
         auto paths = splits;
         uint16_t n_split = 0;
@@ -761,7 +775,12 @@ llama_model_loader::llama_model_loader(
                 n_backbone_tensors += gguf_get_n_tensors(ctx_gguf.get());
             } else {
                 // an external PLE table replaces the one in the model, if any
-                allow_override_tensor = is_ple_only(ctx_gguf.get());
+                // A companion pack overrides any tensor it carries, not just the PLE table: it announces itself with
+                // strata.companion = true in its own header, which is what distinguishes it from a shard
+                // (port/docs/PERFORMANCE.md section 5.0.1).
+                const int  companion_key = gguf_find_key(ctx_gguf.get(), "strata.companion");
+                const bool companion     = companion_key >= 0 && gguf_get_val_bool(ctx_gguf.get(), companion_key);
+                allow_override_tensor = companion || is_ple_only(ctx_gguf.get());
                 const bool numbered = gguf_find_key(ctx_gguf.get(), kv_split_no.c_str()) >= 0 ||
                     gguf_find_key(ctx_gguf.get(), llm_kv(LLM_KV_SPLIT_COUNT).c_str()) >= 0 ||
                     gguf_find_key(ctx_gguf.get(), llm_kv(LLM_KV_SPLIT_TENSORS_COUNT).c_str()) >= 0;
@@ -852,16 +871,30 @@ llama_model_loader::llama_model_loader(
         files.emplace_back(new llama_file(file));
         contexts.emplace_back(ctx);
 
+        // A companion pack carries strata.companion = true in its own header and is passed as an extra file after
+        // the base; its tensors then replace the base pack's same-named ones, which is what lets a requantised dense
+        // group be tried without rewriting the whole pack (port/docs/PERFORMANCE.md section 5.0.1).  The marker is
+        // required rather than inferred from file order, so a duplicate inside the base pack is still an error.
+        const int  companion_key = gguf_find_key(metadata, "strata.companion");
+        const bool companion     = companion_key >= 0 && gguf_get_val_bool(metadata, companion_key);
+
         // Save tensors data offset info of the main file.
         for (ggml_tensor * cur = ggml_get_first_tensor(ctx); cur; cur = ggml_get_next_tensor(ctx, cur)) {
             std::string tensor_name = std::string(cur->name);
-            // make sure there is no duplicated tensor names
-            if (weights_map.find(tensor_name) != weights_map.end()) {
-                throw std::runtime_error(format("invalid model: tensor '%s' is duplicated", ggml_get_name(cur)));
+            auto existing = weights_map.find(tensor_name);
+            if (existing != weights_map.end()) {
+                if (!companion) {
+                    throw std::runtime_error(format("invalid model: tensor '%s' is duplicated", ggml_get_name(cur)));
+                }
+                // a companion replaces the base pack's tensor, so the totals follow it
+                n_elements -= ggml_nelements(existing->second.tensor);
+                n_bytes    -= ggml_nbytes(existing->second.tensor);
+                weights_map.erase(existing);
             }
             n_elements += ggml_nelements(cur);
             n_bytes    += ggml_nbytes(cur);
-            weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0, metadata, cur));
+            weights_map.emplace(tensor_name, llama_tensor_weight(files.back().get(), 0,
+                                                                 metadata, cur));
         }
     } else {
         get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);

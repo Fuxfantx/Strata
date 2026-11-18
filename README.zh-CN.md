@@ -56,40 +56,57 @@ build\bin\strata-vk.exe --native C:\models\pack.gguf --prompt "Hello" --n 32
 
 ## 本机实测
 
-Snapdragon X2 Elite Extreme（18 个 Oryon 核、47.6 GB 统一内存、Adreno X2-90 on Vulkan 1.4、驱动
-`30.0.228.10000`），Windows 11 ARM64。模型 `Gyro-S-TQ1_0.gguf`（54.47 GiB，`qwen4exp`，trellis 专家）。
-decode 用 `--bench-tg 16`，prefill 用 `--bench-pp 512`。同一二进制，多次运行取中位数。
+Snapdragon X2 Elite Extreme（18 个 Oryon 核、47.6 GB 统一内存、三通道 LPDDR5X 标称 228 GB/s、Adreno X2-90 于
+Vulkan 1.4、驱动 `30.0.228.10000`），Windows 11 ARM64。模型 `Gyro-S-TQ1_0.gguf`（54.47 GiB，`qwen4exp`，
+trellis 专家；每 token 读 3.86 GB 权重，其中专家只占 0.469 GiB）。解码 `--bench-tg 16`，预填 `--bench-pp 512`。
+同一二进制、重复运行的中位数、一台机器。
 
-| 后端 | decode | prefill pp512 |
+| 项目 | 实测 | 说明 |
 | --- | --- | --- |
-| **CPU**（`--gpu cpu`，大核类） | **11.34 tok/s** | 21.06 tok/s |
-| **Vulkan**，默认 shader | 10.68 tok/s | 19.33 tok/s |
-| **Vulkan**，`--shader-family fp32`（fp32 shader） | 5.48 tok/s | **46.63 tok/s** |
+| **Vulkan** 预填 pp512 | **43-50 tok/s** | 默认设置；比 2026-11-18 之前的同一构建 **+211%** |
+| **Vulkan** 解码（单流） | 10.2 tok/s | 约 37.7 GB/s 权重流量 |
+| **Vulkan** 解码（32 请求槽） | **26.7 tok/s 聚合** | 2.73×；**103 GB/s = 本 GPU 108 GB/s 上限的 95%** |
+| **CPU**（`--gpu cpu`，大核类） | 解码 10.5-11.3、预填 21 tok/s | 短回复仍是单流最快的后端 |
+| **Vulkan + CPU 双进程** | **29.1 tok/s 聚合**（25.3 + 3.8） | CPU 那半塌到独占的 37%：它是指令受限，不是带宽受限 |
+| CPU 读带宽 | **154.6 GB/s**（14 线程） | 标称值的 68%；4 线程就到 147 |
+| Vulkan 读带宽 | 约 108 GB/s | |
+| 两者同时 | 177 GB/s | 标称值的 78% |
 
-所以在这个包上，单流最好的是 CPU；GPU 只赢 prefill 那一格，用 fp32 shader 家族是 CPU 的 2.2 倍。这张表里每个数
-都产生自**正确**的内核组合：Vulkan 的 logits 与 CPU 后端相关性 **0.999**、选同一个 token，这才是真正的门禁
-（USAGE §5）。`--shader-family fp32` 还是 35B 包上 16-token 流与 CPU 逐 token 相同的那个家族；f16 家族会在一次
-并列上分叉 —— 也就是说"与参考一致"和"prefill 最快"在这里指向同一个设置。
+这张表说两件事。**预填现在默认就有 CPU 的 2.4 倍**，来源是一处改动：int-dot 的 mat-mat 从 **fp32 模块**取
+shader，而 mat-vec 与 elementwise 仍留在 fp16 模块，于是 `--shader-family fp32` 里"预填"那一半是免费的，
+而它的解码代价不用付。**批量解码已经贴到内存墙**（103/108 GB/s），所以批量再推不动，更高的数字只能从 CPU
+一侧来（见下文"状态"）。
 
-还有一条更快的 Vulkan 路径，**默认不用**：f16-accumulate 的 cooperative matrix 在同一个包上 pp512 是 221 tok/s，
-但它的 logits 与 CPU 相关性只有 **0.02**，试过的每个包上都会选到不同的 token。`STRATA_VK_F16ACC=1` 仍然可以
-打开它做纯形状基准。数字在 [PERFORMANCE.md §4.1](port/docs/PERFORMANCE.md)；修好那条内核是 GPU 侧最大的
-待办。
+cooperative matrix 这条路**还不是又对又快**，原因都有测量：
+
+- f16-accumulate 的 cooperative tile 曾报 pp512 221 tok/s、logits 与 CPU 相关性 0.02。那颗内核的 `WN` 是 32
+  而 `TN` 是 64，`cms_per_col = WN/TN` 整除成 0，MMA 循环、epilogue 与 store 全部编译成空——**它只做 staging**，
+  不是"近似"。现在 tile 按本机矩阵形状重建、真的在算，但**分组**（`MUL_MAT_ID`）那份在模型形状上会把
+  `-inf` 写进相邻缓冲的头 64 个元素；**dense** 那份是对的（argmax 相同、有限）却**中性**，单独用没有收益。
+- `STRATA_VK_INT8_COOPMAT=1` 曾被记作"精确但不更快"，实际上它**从未创建过任何管线**：创建块在
+  `coopmat_support` 之下，而本机因为没有 f32 累加矩阵该 flag 为 false。那颗精确的 int8 矩阵核心
+  （64x64x32、int32 累加）至今未被使用。
+
+每个数字及其产出命令都在 [PERFORMANCE.md](port/docs/PERFORMANCE.md)，包括已被否掉的方向。
 
 ## 状态
 
-- **正确性优先。** 默认路径都对 CPU 后端验证过：logits 相关性 0.999、argmax 相同，32 槽批量流与单条跑
-  64/64 逐 token 相同。
-- **Vulkan**：能加载并回答 `qwen35`、`qwen35moe`、`qwen4exp`（含 trellis 的 `Gyro` 包与 `Q2_0` 的 `GSQ-RCO`
-  包），以 CPU 为参考后端。decode 在这台机器上还没有比 CPU 快。
-- **CPU**：这里单流最快的后端，但只用大核类（`-t 18` 会掉 decode，且没有收益）。
-- **批量**：`--parallel N` 在一个进程、一份权重上跑 N 个请求。它是正确的，但在这台机器上不划算：32 槽每步
-  3178 ms ≈ 32 个单条步，聚合 **1.00x**。`serve/server.py` 没有接。
-- **NPU**：Hexagon 路径能构建，但在这个驱动上开不出 DSP 会话（`remote_handle64_open` 对每个模块名都返回
-  `AEE_ERPC 0x200`）；在那之前能测到的每种放置都比 GPU 慢。要复活它得新写 QNN 后端，而不是修 URI。
-  [NPU-FEASIBILITY.md](port/docs/features/NPU-FEASIBILITY.md) 有实测。
-- **图片**：引擎只读文本；应用的图片路径需要上游的 `strata-vision` 编码器。
-- **DeepSeek-V4.1**：这个组件不支持，引擎会在 serve 行上明说。
+- **正确优先。** 默认路径对 CPU 后端验证过：argmax 相同、本包 logits 相关 0.9984、32 槽批量流与单条
+  **64/64 逐 token 相同**。下面门禁里写的 0.999 是 35B-A3B 那个包的水平；Gyro-S 上两个后端都在 0.9984，
+  argmax 仍然一致。
+- **预填**：默认路径是本机最快的正确路径（43-50 tok/s），受 int8-dot tile 限制。cooperative matrix 是越过它的
+  办法，现状如上：dense 半对、分组半坏，两边都开时 145 tok/s。
+- **解码**：单流受内存与指令延迟限制（10.2 tok/s、37.7 GB/s）；批量到 103 GB/s，即 GPU 上限。再往上每条路都
+  测过并关闭了：减字节会改变输出（attention 降 Q4_K 相关性 0.978、第 3 个 token 就变；连"存得过厚"的那些降
+  到 Q5_0/Q5_K 也只有 0.991、第 7 个 token 变），CPU+GPU 分工只加 9%（CPU 那半无法把带宽换成 token），
+  而 CPU 侧自身的瓶颈是 trellis 点积的 1.78 指令/权重。
+- **批量**：`--parallel N` / `--batch-slots N` 在一个进程、一份权重上跑 N 条请求，**确实有收益**：32 槽 2.73×。
+  注意 8 槽是坑（`mul_mat_vec_max_cols = 8`）、48 槽实测是下陷，曲线不单调。`serve/server.py` 尚未接上。
+- **NPU**：Hexagon 路径能构建，但本驱动上开不出 DSP 会话（每个模块名都返回 `AEE_ERPC 0x200`），此前能测到的
+  每种放置都比 GPU 慢。要复活它需要 QNN 后端，不是修 URI。
+  见 [NPU-FEASIBILITY.md](port/docs/features/NPU-FEASIBILITY.md)。
+- **图片**：引擎只读文本；App 的图像路径需要上游的 `strata-vision` 编码器。
+- **DeepSeek-V4.1**：本组件不支持，引擎在 serve 行上会明说。
 
 ## 文档
 

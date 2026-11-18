@@ -58,41 +58,64 @@ Flags, measurement switches and the full gate list: [port/docs/USAGE.md](port/do
 
 ## Measured on this machine
 
-Snapdragon X2 Elite Extreme (18 Oryon cores, 47.6 GB unified memory, Adreno X2-90 on Vulkan 1.4, driver
-`30.0.228.10000`), Windows 11 ARM64. Model: `Gyro-S-TQ1_0.gguf` (54.47 GiB, `qwen4exp`, trellis experts). Decode is
-`--bench-tg 16`, prefill `--bench-pp 512`. Medians of repeated runs, same binary.
+Snapdragon X2 Elite Extreme (18 Oryon cores, 47.6 GB unified memory, 3-channel LPDDR5X at 228 GB/s specified, Adreno
+X2-90 on Vulkan 1.4, driver `30.0.228.10000`), Windows 11 ARM64. Model: `Gyro-S-TQ1_0.gguf` (54.47 GiB, `qwen4exp`,
+trellis experts, 0.469 GiB of experts per token out of 3.86 GB read per token). Decode is `--bench-tg 16`, prefill
+`--bench-pp 512`. Medians of repeated runs, same binary, one machine.
 
-| backend | decode | prefill pp512 |
+| what | measured | notes |
 | --- | --- | --- |
-| **CPU** (`--gpu cpu`, big-core class) | **11.34 tok/s** | 21.06 tok/s |
-| **Vulkan**, default shaders | 10.68 tok/s | 19.33 tok/s |
-| **Vulkan**, `--shader-family fp32` (fp32 shaders) | 5.48 tok/s | **46.63 tok/s** |
+| **Vulkan**, prefill pp512 | **43-50 tok/s** | default settings; **+211%** over the same build before 2026-11-18 |
+| **Vulkan**, decode, one stream | 10.2 tok/s | ~37.7 GB/s of weight traffic |
+| **Vulkan**, decode, 32 request slots | **26.7 tok/s aggregate** | 2.73x; **103 GB/s = 95%** of this GPU's 108 GB/s ceiling |
+| **CPU** (`--gpu cpu`, big-core class) | 10.5-11.3 tok/s decode, 21 tok/s prefill | still the fastest single stream for a short reply |
+| **Vulkan + CPU as two processes** | **29.1 tok/s aggregate** (25.3 + 3.8) | the CPU half collapses to 37% of solo: it is instruction-bound, not bandwidth-bound |
+| read bandwidth, CPU | **154.6 GB/s** (14 threads) | 68% of the 228 GB/s specification; 4 threads already reach 147 |
+| read bandwidth, Vulkan | ~108 GB/s | |
+| read bandwidth, both at once | 177 GB/s | 78% of specification |
 
-So on this pack the CPU is the better single-stream choice, and the GPU wins only the prefill-heavy case, where the
-fp32 shader family is 2.2x the CPU. Every number in this table is produced with the **correct** kernel set: the Vulkan
-logits correlate **0.999** with the CPU backend and pick the same token, which is the gate that matters (§5 of USAGE).
-`--shader-family fp32` is also the family whose 16-token stream matched the CPU's token for token on the 35B pack; the
-f16 family diverges on a near-tie, so "identical to the reference" and "fastest prefill" point at the same setting here.
+Two things this table is saying. **Prefill is now 2.4x the CPU** on default settings, and that came from one change:
+the int-dot mat-mat takes its shader from the **fp32 module** while the mat-vec and elementwise shaders stay on the
+fp16 one, so the prefill half of `--shader-family fp32` is free and the decode cost of that switch is not paid.
+**Decode is at the memory wall when batched** - 103 of 108 GB/s - so batching cannot be pushed further, and the
+remaining gap to a higher number has to come from the CPU side (see Status).
 
-A faster Vulkan path exists and is **not** used by default: the f16-accumulate cooperative matrix measures 221 tok/s at
-pp512 on the same pack, but its logits correlate **0.02** with the CPU's and it picks a different token on every pack
-tried. It is reachable with `STRATA_VK_F16ACC=1` for shape-only benchmarks. [PERFORMANCE.md §4.1](port/docs/PERFORMANCE.md)
-has the numbers; repairing that kernel is the largest open GPU item.
+The cooperative matrix path is **not** a faster correct option yet, and the reasons are measured:
+
+- The f16-accumulate cooperative tile used to report 221 tok/s at pp512 with logits correlating 0.02 with the CPU.
+  That kernel's `WN` was 32 against a `TN` of 64, so `cms_per_col = WN/TN` truncated to zero and the MMA loop, the
+  epilogue and the stores compiled to nothing: it was a staging-only kernel, not an approximation. The tile is now
+  built from the device's own matrix shape and it computes, but the **grouped** (`MUL_MAT_ID`) variant then writes
+  `-inf` into exactly the first 64 elements of a neighbouring buffer at model shapes. The **dense** variant is
+  correct (identical argmax, bit-finite) and measures **neutral**, so it buys nothing on its own.
+- `STRATA_VK_INT8_COOPMAT=1`, which the docs used to describe as "exact but not faster", never created a pipeline at
+  all: the creation block sits under `coopmat_support`, which is false on this device because it has no
+  f32-accumulate matrix. The exact int8 matrix core (64x64x32, int32 accumulate) is therefore still unused.
+
+[PERFORMANCE.md](port/docs/PERFORMANCE.md) has every number with the run that produced it, including what has been
+ruled out.
 
 ## Status
 
-- **Correct first.** The default paths are verified against the CPU backend: same logits to 0.999 correlation, same
-  argmax, and the 32-slot batched stream is 64/64 tokens identical to a solo run.
-- **Vulkan**: loads and answers for `qwen35`, `qwen35moe`, `qwen4exp` (including the trellis `Gyro` packs and the
-  `Q2_0` `GSQ-RCO` pack), with the CPU as the reference backend. Decode is not faster than the CPU on this machine yet.
-- **CPU**: the fastest single-stream backend here, on the big-core class only (`-t 18` costs decode and gains nothing).
-- **Batching**: `--parallel N` runs N requests in one process on one copy of the weights. It is correct and it does not
-  pay on this machine: 32 slots step in 3178 ms, which is 32 x a solo step, i.e. 1.00x aggregate. `serve/server.py` is
-  not wired to it.
+- **Correct first.** The default paths are verified against the CPU backend: same argmax, logits correlating 0.9984 on
+  this pack, and a 32-slot batched stream that is 64/64 tokens identical to a solo run. The 0.999 in the gate below is
+  the level the 35B-A3B pack reaches; on Gyro-S the two backends sit at 0.9984 and the argmax still agrees.
+- **Prefill**: the default path is the fastest correct one on this machine, 43-50 tok/s, and it is limited by the
+  int8-dot tiles. The cooperative matrix is the way past it and is described above: correct on the dense half,
+  broken on the grouped half, worth 145 tok/s when both are on.
+- **Decode**: one stream is memory- and instruction-latency-bound (10.2 tok/s, 37.7 GB/s); batched it reaches
+  103 GB/s, which is the GPU's ceiling. Every route beyond that has been measured and closed: reducing the per-token
+  bytes breaks the output (Q4_K on attention correlates 0.978 and changes the token at position 3; even Q5_0/Q5_K on
+  the over-precision tensors correlates 0.991 and changes it at position 7), the CPU+GPU split adds 9% and not more
+  because the CPU side cannot turn its share of bandwidth into tokens, and the CPU side's own bottleneck is the
+  trellis dot product at 1.78 instructions per weight.
+- **Batching**: `--parallel N` / `--batch-slots N` runs N requests in one process on one copy of the weights, and it
+  does pay: 2.73x at 32 slots. Note 8 slots is a pit (`mul_mat_vec_max_cols = 8`), 48 slots measured a dip, and the
+  curve is not monotone. `serve/server.py` is not wired to it yet.
 - **NPU**: the Hexagon path builds, but no DSP session opens on this driver (`remote_handle64_open` returns
-  `AEE_ERPC 0x200` for every module name tried), and every placement that could be measured before that was slower than
-  the GPU. Reviving it needs a QNN backend, not a fixed URI. [NPU-FEASIBILITY.md](port/docs/features/NPU-FEASIBILITY.md)
-  has the measurements.
+  `AEE_ERPC 0x200` for every module name tried), and every placement that could be measured before that was slower
+  than the GPU. Reviving it needs a QNN backend, not a fixed URI.
+  [NPU-FEASIBILITY.md](port/docs/features/NPU-FEASIBILITY.md) has the measurements.
 - **Pictures**: the engine reads text only; the app's image path needs upstream's `strata-vision` encoder.
 - **DeepSeek-V4.1**: not supported by this component, and the engine says so on the serve line.
 

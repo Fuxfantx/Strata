@@ -21,14 +21,33 @@ STRATA_VK_COOPMAT_LOG=1
 
 | what | measured | how |
 | --- | --- | --- |
-| CPU read bandwidth | **137-145 GB/s** | `port/tools/membw.cpp`, three-channel LPDDR, 18 threads |
+| CPU read bandwidth | **154.6 GB/s** (was recorded as 137-145) | `port/tools/membw.cpp`, three-channel LPDDR, 14 threads, median of 3 |
 | GPU streaming read | ~108 GB/s | same tool through a Vulkan reduce |
 | CPU + GPU at the same time | 96.9 + 80.4 = **177 GB/s** | both running interleaved |
 | Specification | 228 GB/s | - |
 
-So the practical wall is ~60% of the specified number, and no single engine reaches it alone. The 27B decode already moves
+**Why 228 is not reachable, measured rather than assumed (2026-11-18).** `membw.cpp` now sweeps thread count and
+per-thread unroll depth, so the curve says whether the shortfall is request concurrency or the memory system itself:
+
+| threads | 2 | 3 | 4 | 6 | 8 | 10 | 12 | 14 | 18 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| GB/s (8 GiB/run, depth 4, median of 3) | 101 | 126 | 147 | 149 | 140 | 147 | 147 | **155** | 149 |
+
+and at a fixed 6/12/18 threads, depth 4 / 8 / 16 gives 141/134/137, 129/111/111, 133/119/119 GB/s - deeper unrolling
+does **not** help and can hurt. So the shortfall is not per-core miss concurrency: **four threads already saturate
+(~147 GB/s) and nothing past 14 threads adds anything** (155 GB/s, 66% of the specification). The practical wall for
+one engine is therefore ~150 GB/s, the GPU adds enough to reach 177 GB/s together (78%), and the remaining 22-34% is
+the memory system's own read efficiency on this UMA part, not something a kernel can ask for.
+
+Two corrections follow. First, the old figure was measured at 18 threads, which is not the best point: the curve peaks
+around 14 and 18 costs ~4%. Second, "the practical wall is ~60%" was too pessimistic for the CPU alone (~68% at the
+best thread count) while staying right for one engine at a time.
+
+So the practical wall is ~60-68% of the specified number per engine and 78% for both together, and no single engine
+reaches the specification alone. The 27B decode already moves
 **~112 GB/s** of weight traffic (14.46 GB per token at 7.3 tok/s), i.e. it is at the wall; the 35B-A3B moves
 **~83 GB/s** (38.96 tok/s x ~2.1 GB/token) because its small-op tail keeps the memory system from being saturated.
+
 
 Prefill on the int8-dot (dp4a) tiles alone measured **~4 TFLOP/s**, about 31% of the int8 peak, and that is what the
 cooperative matrix was brought in for.

@@ -190,3 +190,16 @@ into one pipe and reading that single stream removes the deadlock; keep the diag
    9.5 tok/s, which exposes about 40 ms of GPU work against roughly 25 ms of process CPU, so a token is 40 ms of GPU
    plus 25 ms of CPU, partially overlapped.  `port/docs/PERFORMANCE.md` §6 records the correction; the knobs
    stay because proving what is not the bottleneck is worth an environment variable.
+
+18. **The dp4a mat-mat shader is taken from the fp32 module** (`ggml-vulkan.cpp`, `ggml_vk_load_shaders`).
+    Both modules are compiled into one binary and the creation order decides which one a pipeline slot gets
+    (`create_mm_pipelines` returns early when the slot is already `initialized && compiled`), so the fp16-module
+    `matmul_*_q8_1` lines silently beat the fp32-module ones that follow them. Pointing the three fp16-arm
+    `sg_create_mmq` runs at the `*_fp32_len`/`*_fp32_data` symbols - types, pipeline keys and tile configs
+    unchanged - moves only the int-dot **mat-mat** to fp32 while the mat-vec and every elementwise shader stay on
+    the fp16 module. Measured on Gyro-S (interleaved 3 rounds, `ggml-vulkan.dll` swap, medians): **pp512
+    16.01 -> 49.80 tok/s (+211%)**, tg16 10.17 -> 10.12 (noise), bench prompt 5 840 -> 3 050 ms;
+    `test-backend-ops -o MUL_MAT -b Vulkan0` 3/3 and `OK`; the two modules agree on logits at correlation
+    0.999424 with the same argmax. The reason the fp32 module is faster is the one `--shader-family fp32` already
+    showed (ADRENO.md: "the fp16 shader variants cost the int-dot matmul a factor of four"), now obtained without
+    paying that switch's decode cost.

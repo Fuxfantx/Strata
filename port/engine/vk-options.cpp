@@ -129,7 +129,8 @@ Options parse_args(int argc, char ** argv) {
         else if (a == "--load-mode") { if (take()) { o.load_mode = v; o.load_mode_set = true; } }
         else if (a == "--dump-logits") { if (take()) o.dump_logits = v; }
         else if (a == "--split-cpu") { if (take()) o.split_cpu = (float) std::atof(v); }
-        else if (a == "--cpu-moe") { o.cpu_moe = true; }
+        else if (a == "--compat") { if (take()) o.compat = v; }
+    else if (a == "--cpu-moe") { o.cpu_moe = true; }
         else if (a == "--n-cpu-moe") { if (take()) parse_int(v, o.n_cpu_moe); }
         else if (a == "--moe-cache-size") { int mib = 0; if (take() && parse_int(v, mib) && mib >= 0) o.moe_cache_mib = (size_t) mib; }
         else if (a == "--moe-cache-cpu-share") { if (take()) o.moe_cache_cpu_share = (float) std::atof(v); }

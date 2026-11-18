@@ -41,6 +41,14 @@ endif()
 
 # mm-probe: one mul_mat shape, one backend, timed in isolation.  Every kernel decision in this port is measured with it
 # (port/docs/ADRENO.md), because the backend's own per-op table brackets more than the kernel.
+# requant-tensor: write a companion GGUF with a few tensors requantised, since llama-quantize cannot filter what it
+# writes (PERFORMANCE.md section 5.0.1).
+add_executable(requant-tensor ${CMAKE_CURRENT_SOURCE_DIR}/../probe/requant-tensor.cpp)
+target_link_libraries(requant-tensor PRIVATE ggml ${CMAKE_THREAD_LIBS_INIT})
+target_compile_features(requant-tensor PRIVATE cxx_std_17)
+if (MSVC)
+  target_compile_options(requant-tensor PRIVATE /utf-8)
+endif()
 add_executable(mm-probe ${CMAKE_CURRENT_SOURCE_DIR}/../probe/mm-probe.cpp)
 target_link_libraries(mm-probe PRIVATE ggml ${CMAKE_THREAD_LIBS_INIT})
 # renderdoc_app.h for the one-dispatch capture (STRATA_VK_RDC_PROBE), vendored next to the engine sources

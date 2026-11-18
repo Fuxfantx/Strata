@@ -74,6 +74,7 @@ struct Options {
     std::vector<llama_token> tokens;
     std::string kv  = "f16";
     bool dry_run    = false;   // print the effective policy and exit, without loading the weights
+    std::string compat;               // --compat FILE: a companion pack whose tensors replace the base's
     std::string mtp;                  // --mtp FILE: the nextn head that drafts (see vk-mtp.h)
     Tri  lazy       = Tri::Auto;      // the engine forwards Strata's policy, it does not choose
     std::string load_mode = "direct";  // --load-mode mmap|direct|none: measured, see vk-engine-load.cpp

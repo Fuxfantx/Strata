@@ -378,6 +378,15 @@ llama_model * Engine::load_model(const Options & opt, const NpuPlan & npu) {
         dry_run_finished = true;
         return nullptr;
     }
+    if (!opt.compat.empty()) {
+        // A companion pack: a small GGUF, marked strata.companion=true in its own header, whose tensors replace the
+        // base pack's same-named ones.  It is handed over as an extra file, which is the loader's existing multi-file
+        // path, so no new API is needed (PERFORMANCE.md section 5.0.1).
+        const std::string companion_path = std::filesystem::absolute(opt.compat).string();
+        logf("[strata-vk] companion pack %s: its tensors replace the base pack's same-named ones\n", companion_path.c_str());
+        const char * paths[2] = { model_path.c_str(), companion_path.c_str() };
+        return llama_model_load_from_splits(paths, 2, mp);
+    }
     return llama_model_load_from_file(model_path.c_str(), mp);
 }
 
