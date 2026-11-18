@@ -301,21 +301,9 @@ llama_model * Engine::load_model(const Options & opt, const NpuPlan & npu) {
         host_experts   = false;
     }
     if (host_experts) {
-        // The f16-accumulate cooperative pipelines miscompute on this arch as soon as a batch carries more than a
-        // handful of tokens and the expert matmuls run on the CPU: Gyro-S and Gyro-M abort in the CPU swiglu's NaN
-        // check at 12 tokens (8 is fine), while the same model on device experts is clean at 6, 12 and 32, and the
-        // vanilla driver path - which never enables f16acc - runs the same host-expert prompt to the end.
-        // STRATA_VK_F16ACC=0 makes that 12-token run pass, so the host-expert path turns it off; the backend re-reads
-        // the variable on every call, so setting it here takes effect for the graph. An explicit value still wins.
-        if (f16acc_from_policy) {
-#if defined(_WIN32)
-            _putenv_s("STRATA_VK_F16ACC", "0");
-#else
-            setenv("STRATA_VK_F16ACC", "0", 1);
-#endif
-            f16acc_from_policy = false;
-            logf("[strata-vk] host experts: STRATA_VK_F16ACC=0 (f16-accumulate miscomputes multi-token with CPU experts)\n");
-        }
+        // This path used to force STRATA_VK_F16ACC=0 here: with CPU-resident experts Gyro-S and Gyro-M hit the CPU
+        // swiglu's NaN check at 12 tokens.  That was the trellis coop pipeline reading a staged A block its shader
+        // never wrote (`ggml-vulkan.cpp`, the per-type SPIR-V fix), not the placement, so nothing is forced off now.
         const ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
         ggml_backend_buffer_type_t cpu_buft = cpu_dev != nullptr ? ggml_backend_dev_buffer_type(cpu_dev) : nullptr;
         if (cpu_buft == nullptr) {
@@ -369,12 +357,20 @@ llama_model * Engine::load_model(const Options & opt, const NpuPlan & npu) {
         logf("  tq rows/wg     : dense %sx, id %sx of the standard row count\n",
              rm_mult == nullptr ? "20" : rm_mult, rm_mult_id == nullptr ? "20" : rm_mult_id);
         logf("  ctx / batch    : %d / %d, kv %s, threads %d, flash-attn %s\n", opt.n_ctx, opt.n_batch, opt.kv.c_str(),
-             opt.threads, opt.flash_attn == Tri::On ? "on" : opt.flash_attn == Tri::Off ? "off" : "auto");
+             opt.threads,
+                      !opt.flash_attn_set ? "auto" : opt.flash_attn == Tri::On ? "on"
+                                        : opt.flash_attn == Tri::Off ? "off" : "auto");
         logf("  warmup         : %s (decode %s, prefill %s)\n",
              std::getenv("STRATA_VK_NO_WARMUP") != nullptr ? "off" : "on",
              std::getenv("STRATA_VK_NO_WARMUP") != nullptr ? "no" : "yes",
              std::getenv("STRATA_VK_NO_WARMUP") != nullptr ? "no" : "yes");
         logf("  lookup / mtp   : %s / %s\n", opt.lookup == Tri::Off ? "off" : "on", mtp_wanted ? "on" : "off");
+        if (opt.npu_mtp && !mtp_wanted) {
+            // The dry run is where an operator checks a flag combination, and --npu-mtp chooses where a head runs without
+            // loading one: without --mtp, or with MTP still gated off, it would otherwise do nothing and say nothing.
+            logf("  --npu-mtp      : no effect (%s)\n",
+                 opt.mtp.empty() ? "no --mtp file was given" : "MTP drafting is off in this build (STRATA_VK_MTP=1 turns it on)");
+        }
         dry_run_finished = true;
         return nullptr;
     }
@@ -466,6 +462,12 @@ bool Engine::load(const Options & opt, const NpuPlan & npu) {
     cp.flash_attn_type = flash_attn(fa_choice);
     // The MTP draft head consumes this context's hidden state row by row, which needs the output buffer reserved at
     // creation (see vk-mtp.cpp).  Unmasked: every row of the verify pass is wanted, indexed by position.
+    if (opt.npu_mtp && (opt.mtp.empty() || !mtp_supported_by_build())) {
+        // --npu-mtp only chooses where the head runs; it does not load one.  Without --mtp, or with MTP still gated off,
+        // the flag would otherwise do nothing and say nothing.
+        logf("[strata-vk] --npu-mtp: %s, so this flag has no effect\n",
+             opt.mtp.empty() ? "no --mtp file was given" : "MTP drafting is off in this build (STRATA_VK_MTP=1 turns it on)");
+    }
     if (!opt.mtp.empty() && mtp_supported_by_build()) {
         cp.embeddings_nextn        = true;
         cp.embeddings_nextn_masked = false;
@@ -526,20 +528,25 @@ bool Engine::load(const Options & opt, const NpuPlan & npu) {
         return false;
     }
     n_ctx_ = (int) llama_n_ctx(ctx_);
+    n_embd_ = (int) llama_model_n_embd(model_);
     batch_ = llama_batch_init((int32_t) cp.n_batch, 0, 1);
     batch_cap_ = (int) cp.n_batch;
     // --parallel N: one KV sequence per slot, and each slot's cache is the context divided by the sequence count that
     // llama.cpp actually settled on (it rounds n_ctx down to a multiple of n_seq_max * 256).
-    if (opt.parallel > 1) {
+    // --parallel N (serve) and --batch-slots N (the bench) are the same machinery: both size the request slots and both
+    // feed n_seq_max, so either flag has to create the slots.  Only --parallel used to, which left `--batch-slots 64
+    // --serve` advertising `batch_slots=0` and made multi-slot serving unreachable from serve/server.py.
+    const int serve_slots = std::max(opt.parallel, opt.slots);
+    if (serve_slots > 1) {
         const int seq = (int) std::max(1u, llama_n_seq_max(ctx_));
-        slot_st_.resize((size_t) opt.parallel);
+        slot_st_.resize((size_t) serve_slots);
         slot_ctx_ = n_ctx_ / seq;
-        logf("[strata-vk] %d request slots, %d tokens of cache each (batch %d)\n", opt.parallel, slot_ctx_,
+        logf("[strata-vk] %d request slots, %d tokens of cache each (batch %d)\n", serve_slots, slot_ctx_,
              batch_cap_);
-        // Opt-in on purpose: the path is correct (slot 0 matches a solo run token for token, PERFORMANCE.md 20.50) but
-        // a 32-row step costs 32 single-row steps, so it buys no aggregate throughput on this backend yet.
-        logf("[strata-vk] %d slots: correct but no aggregate gain yet (a 32-row step costs 32 solo steps; "
-             "PERFORMANCE.md 20.50), so serve/server.py does not use it\n", opt.parallel);
+        // Correct and worth it: one step per slot over one copy of the weights measures 30.5 tok/s aggregate at 32
+        // slots and 33.6 at 64, against 10.25 for a single stream (PERFORMANCE.md 5.3).  The old note here said the
+        // opposite; the cooperative expert matmul is what changed it.
+        logf("[strata-vk] %d slots: serve/server.py uses them when it reads batch_slots>=2\n", serve_slots);
     }
     // `llama_n_rs_seq` reports what was actually configured: 0 means the architecture cannot roll back, or the request
     // was clamped away, and only then does speculation become impossible.
@@ -640,24 +647,48 @@ bool Engine::load(const Options & opt, const NpuPlan & npu) {
         // target model is reading through, and on the HTP it costs a FastRPC round trip per draft but nothing of the
         // GPU's.  `--npu-mtp` picks the HTP; the fallback is the graphics device the target already uses, because the
         // backend's own default list is every graphics device in the build and would split the head across three.
-        std::vector<ggml_backend_dev_t> mtp_devices = { nullptr };
+        std::vector<ggml_backend_dev_t> gpu_only = { nullptr };
+        if (!devices_.empty() && devices_.front() != nullptr) gpu_only = { devices_.front(), nullptr };
+        std::vector<ggml_backend_dev_t> mtp_devices = gpu_only;
         std::string mtp_where = "the GPU";
-        if (opt.npu_mtp && npu_.dev != nullptr) {
+        const bool want_npu = opt.npu_mtp && npu_.dev != nullptr;
+        if (want_npu) {
             mtp_devices = { npu_.dev, nullptr };
             mtp_where = ggml_backend_dev_name(npu_.dev);
-        } else if (!devices_.empty() && devices_.front() != nullptr) {
-            mtp_devices = { devices_.front(), nullptr };
-        } else if (ggml_backend_dev_t cpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU)) {
-            mtp_devices = { cpu, nullptr };
+        } else if (mtp_devices.front() == nullptr) {
+            if (ggml_backend_dev_t cpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU)) {
+                mtp_devices = { cpu, nullptr };
+            }
         }
-        bool ok = mtp_.load(opt.mtp, ctx_, n_ctx, cp.n_threads, mtp_devices.data());
-        if (!ok && opt.npu_mtp && npu_.dev != nullptr) {
-            // The DSP's mapped-vmem budget is ~3 GiB, so a large head can simply not fit; say so and use the GPU.
-            logf("[strata-vk] MTP: %s on %s (%s); placing the head on the GPU instead\n",
-                 "cannot load the head", mtp_where.c_str(), mtp_.status());
+        // A session opening is not the same as the graph running.  On this pack the nextn layer's *fused hyper-connection*
+        // node has no HTP kernel at that shape, so llama.cpp's scheduler assigns it to the CPU and leaves the rest of the
+        // layer on the HTP - the device split that docs/features/NPU-ASSETS.md recorded as "opens the session, then stops
+        // answering on the first decode".  The scheduler says so on its warning channel, which this engine captures, so
+        // the split is caught here and the head goes to the GPU instead of hanging on the first draft.
+        bool ok;
+        std::string npu_fail;
+        if (want_npu) {
+            watch_backend_logs("is assigned to device");
+            ok = mtp_.load(opt.mtp, ctx_, n_ctx, cp.n_threads, mtp_devices.data());
+            if (ok && backend_log_watch_hit()) {
+                npu_fail = "the HTP cannot run the whole nextn graph (one node has no kernel there, so the layer would be "
+                           "split across HTP and CPU)";
+                ok = false;
+            }
+            clear_backend_log_watch();
+        } else {
+            ok = mtp_.load(opt.mtp, ctx_, n_ctx, cp.n_threads, mtp_devices.data());
+        }
+        if (!ok && want_npu) {
+            if (npu_fail.empty()) {
+                // The DSP's mapped-vmem budget is ~3 GiB, so a large head can simply not fit.
+                logf("[strata-vk] MTP: cannot load the head on %s (%s); placing the head on the GPU instead\n",
+                     mtp_where.c_str(), mtp_.status());
+            } else {
+                logf("[strata-vk] MTP: %s on %s; placing the head on the GPU instead\n",
+                     npu_fail.c_str(), mtp_where.c_str());
+            }
             mtp_.unload();
-            std::vector<ggml_backend_dev_t> gpu_only = { nullptr };
-            if (!devices_.empty() && devices_.front() != nullptr) gpu_only = { devices_.front(), nullptr };
             ok = mtp_.load(opt.mtp, ctx_, n_ctx, cp.n_threads, gpu_only.data());
             mtp_where = "the graphics device";
         }

@@ -53,6 +53,163 @@ int prefill_chunk() {
 
 void emit_slot_events(const std::vector<Engine::SlotEvent> & events, bool stream);
 
+namespace {
+
+// The picture records the front end hands over on a GENI line (port/docs/features/VISION.md): one self-describing
+// record per picture, concatenated so one request's pictures travel as one file.  The engine reads them, never the
+// projector: serve/server.py runs strata-vision and sends the path.
+struct SveRecord {
+    int n_tokens = 0;
+    int n_embd = 0;
+    std::vector<float> embd;
+};
+
+constexpr uint32_t kSveMagic = 0x314D5653u;   // 'S','V','M','1'
+
+bool read_sve(const std::string & path, std::vector<SveRecord> & out, std::string & err) {
+    std::FILE * f = std::fopen(path.c_str(), "rb");
+    if (f == nullptr) {
+        err = "cannot read " + path;
+        return false;
+    }
+    for (;;) {
+        uint32_t head[4] = {};
+        if (std::fread(head, sizeof(head), 1, f) != 1) break;              // end of file: all records read
+        if (head[0] != kSveMagic) {
+            err = "not a picture embeddings file";
+            std::fclose(f);
+            return false;
+        }
+        SveRecord rec;
+        rec.n_tokens = (int) head[1];
+        rec.n_embd   = (int) head[2];
+        if (rec.n_tokens <= 0 || rec.n_embd <= 0 || rec.n_tokens > (1 << 20) || rec.n_embd > (1 << 20)) {
+            err = "the picture record is not a sane size";
+            std::fclose(f);
+            return false;
+        }
+        rec.embd.resize((size_t) rec.n_tokens * (size_t) rec.n_embd);
+        if (std::fread(rec.embd.data(), sizeof(float), rec.embd.size(), f) != rec.embd.size()) {
+            err = "the picture record is truncated";
+            std::fclose(f);
+            return false;
+        }
+        out.push_back(std::move(rec));
+    }
+    std::fclose(f);
+    if (out.empty()) {
+        err = "the embeddings file holds no picture";
+        return false;
+    }
+    return true;
+}
+
+// A picture is a run of `pad` whose length is the record's n_tokens, in the order the front end wrote the records (the
+// same order the prompt lists the pictures).  Anything else is refused: a picture whose rows cannot be found would be
+// read as text, which is worse than an error.
+bool find_image_spans(const std::vector<llama_token> & ids, int pad, const std::vector<SveRecord> & recs,
+                      int n_embd, std::vector<Engine::ImageSpan> & spans, std::string & err) {
+    size_t want = 0;
+    for (int i = 0; i < (int) ids.size() && want < recs.size();) {
+        if ((int) ids[(size_t) i] != pad) {
+            ++i;
+            continue;
+        }
+        int j = i;
+        while (j < (int) ids.size() && (int) ids[(size_t) j] == pad) ++j;
+        const int run = j - i;
+        const SveRecord & rec = recs[want];
+        if (run != rec.n_tokens) {
+            err = "the prompt has a picture of " + std::to_string(run) + " rows where the encoder wrote " +
+                  std::to_string(rec.n_tokens);
+            return false;
+        }
+        if (rec.n_embd != n_embd) {
+            err = "the picture embeddings are " + std::to_string(rec.n_embd) + " wide, the model " +
+                  std::to_string(n_embd);
+            return false;
+        }
+        Engine::ImageSpan span;
+        span.pos      = i;
+        span.n_tokens = rec.n_tokens;
+        span.embd     = rec.embd.data();
+        spans.push_back(span);
+        ++want;
+        i = j;
+    }
+    if (want != recs.size()) {
+        err = "the prompt has " + std::to_string(want) + " picture(s) where the encoder wrote " +
+              std::to_string(recs.size());
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+// GENI <max_new>[ key=value]* <embeddings file> <ids>: the pictures' rows come in as embeddings, everything else is the
+// GEN request.  Without --mmproj the engine says it reads text only, which is what it does.
+void handle_geni(Engine & engine, const std::string & line) {
+    const std::vector<std::string> parts = split_words(line, 5);
+    if (parts.size() < 3) {
+        out_line("ERR malformed GENI");
+        return;
+    }
+    int max_new = std::atoi(parts[0].c_str());
+    if (max_new < 0) max_new = 0;
+
+    std::string keys;
+    size_t p = 1;
+    for (; p + 1 < parts.size() && parts[p].find('=') != std::string::npos; ++p) keys += " " + parts[p];
+    const std::string emb_path = parts[p];
+    std::string id_text;
+    for (size_t q = p + 1; q < parts.size(); ++q) {
+        if (!id_text.empty()) id_text += ' ';
+        id_text += parts[q];
+    }
+    const std::vector<llama_token> ids = parse_ids(id_text);
+    if (ids.empty()) {
+        out_line("ERR empty prompt");
+        return;
+    }
+    if (engine.mmproj().empty() && !engine.vision_enabled()) {
+        out_line("ERR this engine reads text only: start it with --vision (and --mmproj) to read pictures");
+        return;
+    }
+    const int pad = engine.image_pad_token();
+    if (pad < 0) {
+        out_line("ERR this model has no <|image_pad|> token to put a picture in");
+        return;
+    }
+
+    std::vector<SveRecord> recs;
+    std::string err;
+    if (!read_sve(emb_path, recs, err)) {
+        out_line("ERR " + err);
+        return;
+    }
+    std::vector<Engine::ImageSpan> spans;
+    if (!find_image_spans(ids, pad, recs, engine.n_embd(), spans, err)) {
+        out_line("ERR " + err);
+        return;
+    }
+
+    logf("[strata-vk] GENI %d tokens, prompt %zu, %zu picture(s)%s\n", max_new, ids.size(), spans.size(), keys.c_str());
+    Engine::clear_stop();
+    const bool stream = keys.find("stream=0") == std::string::npos;
+    const Stats st = engine.generate(ids, max_new, keys,
+        [stream](llama_token id) {
+            if (stream) out_line("GEN " + std::to_string(id));
+            return true;
+        }, true, spans);
+
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), "DONE %d %d %.3f %.3f %s 0 0 %d 0 0 0 0 0.0 %d 0",
+                  st.generated, st.prompt_tokens, st.prompt_ms, st.decode_ms, st.finish.c_str(),
+                  st.reused, st.prompt_tokens - st.reused);
+    out_line(buf);
+}
+
 void handle_gen(Engine & engine, const std::string & line) {
     // GEN <max_new>[ key=value]* <ids>: the keys are space-separated `name=value` words and the ids are
     // COMMA-separated, so the first word without '=' starts the ids and every following word belongs to them.
@@ -83,6 +240,13 @@ void handle_gen(Engine & engine, const std::string & line) {
     }
 
     logf("[strata-vk] GEN %d tokens, prompt %zu%s\n", max_new, ids.size(), keys.c_str());
+    // STRATA_VK_DUMP_IDS=1: the prompt as ids, so a wrong answer can be blamed on the rendered prompt (detokenise
+    // it with `strata-vk --detok --tokens ...`) instead of guessed at.
+    if (std::getenv("STRATA_VK_DUMP_IDS") != nullptr) {
+        std::string got;
+        for (size_t i = 0; i < ids.size() && i < 160; ++i) { got += (i ? "," : "") + std::to_string((int) ids[i]); }
+        logf("[strata-vk] prompt ids: %s\n", got.c_str());
+    }
     Engine::clear_stop();
     // One `GEN <id>` per token, because the app paints the answer as it arrives: a summary-only reply would leave the
     // panel empty until the whole answer was finished.  `stream=0` turns it off for a caller that wants only the summary.
@@ -297,7 +461,12 @@ int serve(Engine & engine, CommandQueue & q) {
                 const std::vector<std::string> f = split_words(line, 6);
                 if (!f.empty()) engine.slot_stop(std::atoi(f[0].c_str()));
             } else if (cmd == "GENI" || cmd == "BGENI") {
-                out_line("ERR this build reads text only: pictures need Strata's image encoder, which this engine does not run");
+                if (cmd == "GENI") {
+                handle_geni(engine, line);
+            } else {
+                // A picture needs the embedding path the GENI request carries; a batch slot sends text only.
+                out_line("ERR pictures are not supported on a batch slot; send them one request at a time");
+            }
             } else if (cmd == "VRAM") {
                 out_line("VRAM expert_slots=0 expert_cache_mib=0 vram_free_mib=0");
             } else if (cmd == "SAVE" || cmd == "RESTORE") {

@@ -56,6 +56,12 @@ public:
     void unload();
 
     int  n_ctx() const { return n_ctx_; }
+    // The picture path: `--mmproj` says the front end has a reader for this model, and `image_pad_token` is the
+    // id a picture's rows replace (serve/server.py writes one per image token).
+    const std::string & mmproj() const { return opt_.mmproj; }
+    bool vision_enabled() const { return opt_.vision || !opt_.mmproj.empty(); }
+    int  n_embd() const { return n_embd_; }
+    int  image_pad_token() const;
     bool ready() const { return ctx_ != nullptr; }
     // The loaded model and this context, for the concurrent-context benchmark: a second llama_context on the same model
     // shares its weight buffers, so two decodes can run at once on one copy of the weights.
@@ -104,13 +110,25 @@ public:
     // and its sequence is dropped so the next request on that slot starts from an empty cache.
     void slot_step(std::vector<SlotEvent> & out);
 
+    // One picture's embeddings: the rows that stand in for `ids[pos .. pos+n_tokens)`.  The front end writes one
+    // <|image_pad|> per image token there (serve/server.py, the `ids = out` loop), so a picture is a run of that token
+    // and this span says which run it is.  The engine never runs the projector: serve/server.py encodes the picture and
+    // hands the file over on the GENI line (port/docs/features/VISION.md).
+    struct ImageSpan {
+        int pos = 0;                    // first prompt position the picture replaces
+        int n_tokens = 0;               // how many positions it holds
+        const float * embd = nullptr;   // n_tokens * n_embd floats, row-major
+    };
+
     // One generation.  `ids` is the whole prompt as the server builds it every turn; only the suffix past the tokens
-    // already in the KV cache is decoded.  `on_token` returns false to stop early.
+    // already in the KV cache is decoded.  `on_token` returns false to stop early.  `images` is empty for a text
+    // request, which is then byte for byte the run it always was.
     size_t moe_cache_mib_ = 0;   // decided at load time by the expert placement policy
 
     template <typename OnToken>
     Stats generate(const std::vector<llama_token> & ids, int max_new, const std::string & keys,
-                   OnToken on_token, bool print_pp) {
+                   OnToken on_token, bool print_pp,
+                   const std::vector<ImageSpan> & images = std::vector<ImageSpan>()) {
         Stats st;
         st.prompt_tokens = (int) ids.size();
         if (!ready()) {
@@ -126,14 +144,60 @@ public:
         const int total = (int) ids.size() - st.reused;
         const llama_token * last_chunk = nullptr;
         int last_chunk_n = 0, last_chunk_pos = 0;
+        // A picture's rows must go through the embedding path, so the prefill stops at each span: text before it, the
+        // span itself as embeddings, text after it.  Only the segments change; every call continues the same positions.
+        std::vector<ImageSpan> spans;
+        for (const ImageSpan & im : images) {
+            if (im.n_tokens > 0 && im.embd != nullptr && im.pos >= st.reused) spans.push_back(im);
+        }
+        if (!spans.empty()) {
+            // never start the read inside a picture: a run of <|image_pad|> that begins before the reused prefix has no
+            // embeddings for its head, so its prefix is dropped and read again
+            for (const ImageSpan & im : spans) {
+                if (im.pos < st.reused) st.reused = im.pos;
+            }
+        }
+        // STRATA_VK_SEG_LOG=1: one line per prefill segment (kind, rows, ms).  A picture costs a fixed ~1 s whatever
+        // its row count (port/docs/features/VISION.md 3.2), so this is what separates "the rows are slow" from
+        // "something around them is".
+        const bool seg_log = std::getenv("STRATA_VK_SEG_LOG") != nullptr;
+        size_t next_span = 0;
         for (int done = 0; done < total;) {
+            const Clock::time_point seg_t0 = Clock::now();
             if (g_stop) {
                 // a partial prompt leaves a prefix that is not a prompt: drop it so the next turn reads cleanly
                 st.finish = "stop";
                 reset();
                 return st;
             }
-            const int n = std::min(opt_.n_batch, total - done);
+            const int at = st.reused + done;
+            if (next_span < spans.size() && spans[next_span].pos == at) {
+                const ImageSpan & im = spans[next_span];
+                for (int off = 0; off < im.n_tokens;) {
+                    const int n = std::min(opt_.n_batch, im.n_tokens - off);
+                    last_chunk_pos = (int) kv_tokens_.size();
+                    if (!decode_embd(im.embd + (size_t) off * (size_t) n_embd_, n, last_chunk_pos,
+                                     done + off + n == total)) {
+                        st.finish = "error";
+                        return st;
+                    }
+                    kv_tokens_.insert(kv_tokens_.end(), ids.begin() + st.reused + done + off,
+                                      ids.begin() + st.reused + done + off + n);
+                    off += n;
+                    done += n;
+                }
+                if (seg_log) {
+                    logf("[strata-vk] seg picture n=%d pos=%d %.1f ms\n", im.n_tokens, im.pos, ms_since(seg_t0));
+                }
+                last_chunk = nullptr;      // a picture is not a text row: nothing to prime a draft on
+                last_chunk_n = 0;
+                ++next_span;
+                continue;
+            }
+            // text up to the next picture (or to the end of the prompt)
+            int limit = total - done;
+            if (next_span < spans.size() && spans[next_span].pos > at) limit = spans[next_span].pos - at;
+            const int n = std::min(opt_.n_batch, limit);
             last_chunk_pos = (int) kv_tokens_.size();
             if (!decode(ids.data() + st.reused + done, n, last_chunk_pos, done + n == total)) {
                 st.finish = "error";
@@ -143,6 +207,9 @@ public:
             last_chunk_n = n;
             kv_tokens_.insert(kv_tokens_.end(), ids.begin() + st.reused + done, ids.begin() + st.reused + done + n);
             done += n;
+            if (seg_log) {
+                logf("[strata-vk] seg text n=%d pos=%d %.1f ms\n", n, at, ms_since(seg_t0));
+            }
             if (print_pp && wire_) {
                 const double ms = ms_since(tp);
                 char buf[160];
@@ -308,6 +375,7 @@ private:
 
     void trim_to_common_prefix(llama_memory_t mem, const std::vector<llama_token> & ids);
     bool decode(const llama_token * toks, int n, int pos0, bool want_logits);
+    bool decode_embd(const float * embd, int n, int pos0, bool want_logits);   // a picture's rows (ImageSpan)
     bool decode_all(const llama_token * toks, int n, int pos0);
     std::vector<llama_token> lookup_draft(const std::vector<llama_token> & hist, llama_token sampled, int budget);
     // Bring the n-gram index up to the history it is asked about; rebuilds it when the history was trimmed.
@@ -332,7 +400,11 @@ private:
     llama_model * model_ = nullptr;
     llama_context * ctx_ = nullptr;
     const llama_vocab * vocab_ = nullptr;
+    int         n_embd_ = 0;      // the model's embedding width: the row size of a picture's embeddings
     llama_batch batch_ = {};
+    llama_batch batch_embd_ = {};   // the picture rows        // allocated on the first picture: llama_batch_init gives a batch either tokens or
+                                    // embeddings, never both, which is why a picture is its own decode call
+    int batch_embd_cap_ = 0;
     int         batch_cap_ = 0;   // rows batch_ can hold; the drafters must never exceed it
     int n_ctx_ = 0;
     // --parallel N: one entry per slot, empty unless `--serve` was asked for more than one.  `slot_ctx_` is the cache a

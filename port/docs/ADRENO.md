@@ -128,6 +128,45 @@ the cooperative path no longer being gated on a 64-token batch (round 21). Gyro-
 per workgroup (round 29). The bench now also prints the first decode step separately, because averaging a cold first
 token into the rate hid a 3.35 s stall for about ten rounds.
 
+## The model-wide `-inf` was a shader-selection bug, not a tile bug (2026-11-19)
+
+The two corrections below this section end with "the cooperative kernel correlates 0.02 and stays off". The kernel was
+right and the *selection* was wrong. Quantized matmuls have two kinds of SPIR-V in this backend:
+
+* one shared shader for the legacy and K-quant types that dispatches on the `MmTypeA` specialization constant
+  (`mul_mm_funcs.glsl`, the `MmTypeA ==` chain: Q1_0, Q2_0, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K,
+  Q8_0, TQ1_0, TQ2_0 - fourteen cases, and no trellis case);
+* per-type SPIR-V for the LUT and trellis types, compiled with `DATA_A_<type>` (`matmul_tqk6_f16_f16acc_cm1`,
+  `matmul_id_subgroup_tqk6_f16_f16acc_cm1`, ... - the generator emits these from the `is_lut_quant(tname)` branch).
+
+The creation block for the f16-accumulate cooperative pipelines handed the **shared** shader to every type in its list,
+and that list contained TQK6, TQK7, TQ2_T and PTQ1_0. For those four the `MmTypeA` chain matches nothing, so the
+`load_a_to_shmem` body never writes `buf_a`, the MMA reads uninitialised shared memory, and the output is `-inf` -
+which is exactly the "first 64 elements of every tensor" pattern: one 64-row tile of garbage that the layer then
+spreads. Nothing about the tile, the store, the row map or the scratch was ever wrong.
+
+Why every gate missed it, which is the part worth keeping:
+
+* `test-backend-ops -o MUL_MAT_ID` does have tqk6/tqk7 cases, but at `k=128`; the cooperative path is gated on
+  `k >= 256`, so they always took the dp4a shader. Its `k=2880` case is q4_0, which the shared shader *does* handle.
+  After the fix the same oracle passes 1168/1168 with `STRATA_VK_F16ACC=1`.
+* `mm-probe --verify` uses q4_0.
+* the model was the only harness whose matmuls are trellis-typed, and it reported `-inf` without saying where.
+
+Measured after the fix (same binary, paired on this machine):
+
+| | cooperative on | off | |
+| --- | --- | --- | --- |
+| pp512 | **85.55 tok/s** | 42.51 | +101% |
+| tg16, one stream | 10.25 | 10.19 | neutral |
+| 32 slots, aggregate | **31.09** | 25.47 | +22% |
+| logits vs CPU (`--dump-logits`) | corr 0.998239, argmax 77 | 0.998352, argmax 77 | |
+| 32-token continuation | identical to the reference stream | identical | |
+
+Two consequences for the rest of this document. The 32-slot number is a *kernel* result and not a memory-system one,
+so "batched decode is at 95% of the bandwidth ceiling" describes the dp4a kernel, not the hardware. And dense
+cooperative is still a 5% loss on this pack (80.98 against 85.55), so only the grouped half is on by default.
+
 ## The accuracy question, answered by measurement
 
 > **Correction (2026-11-18).** The paragraph below claimed that the f16-accumulate kernel "reproduces the token stream:
@@ -403,6 +442,14 @@ the grid, and not the shader.
 
 So the selector's existing choice (index 1 for anything above 64x64) is also the fastest, by 57% on the 27B and 77% on the
 MoE. The knob stays as a measurement flag, off unless the variable is set.
+
+> **Correction (2026-11-19).** Those "32x32" entries are tile *classes* of the non-f16acc comparison - they differ in the
+> BM/BN warp tile, not in the matrix shape, which stays 64x64. A genuine 32x32 matrix core is not available to this
+> driver: creating an f16-accumulate pipeline with `TM=TN=32` (the tile the MoE padding would want, since an expert owns
+> ~10 rows) fails with
+> `Invalid mask for Layout[] ... @llvm.qgpu.coopmat.layout.annotate.v64f16(...) layout value: i32 17` and
+> `createComputePipeline: ErrorUnknown`. The only usable cooperative shape here is **64x64** with k=32, so the 84% empty
+> columns of a sparse-expert prefill cannot be narrowed away with this matrix core.
 
 ## The remaining `GGML_VK_*` knobs are neutral or worse on this machine
 

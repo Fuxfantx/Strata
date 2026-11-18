@@ -53,9 +53,10 @@ build\bin\strata-vk.exe --gpu cpu --native D:\models\pack.gguf --tokens 9707 --n
 | `GGML_VK_PERF_LOGGER=1` | 每图 GPU `Total time`（**这个可信**） |
 | `python port/tools/ab_pp.py` | ABBA 成对 A/B（含 `--control` 零对照） |
 | `python port/tools/op-times.py` | 解析 perf-logger 输出 |
+| `build\bin\mm-probe.exe -b Vulkan0 -t tqk6 -m 2560 -n 1 -k 2560 --n-as 512 --n-used 10` | **single-kernel isolation**: one shape, one dispatch, wall clock. `--n-as/--n-used` runs `MUL_MAT_ID` (the MoE expert matvec, half of a single-stream decode step); the trellis types work too (2026-11-19: `type_from_name` dereferenced a null name for the holes in the type table). `--verify` is `ops=1` only |
 | `python port/tools/node-count.py` | 逐算子 dispatch 计数 |
 | `python port/tools/logit-diff.py` | 两次 `--dump-logits` 的质量对比（top-1/top-k/KL） |
-| `--batch-slots N` + `--bench-tg T` | **批量解码基准**：N 条序列各走 T 步，每步一个 batch。`N = 1` 与 `N > 1` 是同一段代码，所以两个数是一对成对比较。`slots >= 9` 才会进 matmul 路径（8 及以下走慢的 matvec，8 是个坑）；32 槽曾按 40.2 tok/s 记录，那个数来自坏内核（`PERFORMANCE.md` §4）。要求 `n_seq_max >= N`（即同一个 `--batch-slots` 会同时设 `cp.n_seq_max`）以及 `n_ctx >= N × (prompt + T + 1)`，每条序列分到的上下文是 `n_ctx / N` |
+| `--batch-slots N` + `--bench-tg T` | **批量解码基准**：N 条序列各走 T 步，每步一个 batch。`N = 1` 与 `N > 1` 是同一段代码，所以两个数是一对成对比较。测得的曲线（cooperative 路径）：8 槽 8.89、16 槽 18.45、24 槽 25.05、32 槽 30.51、48 槽 32.24、**64 槽 33.62** tok/s 聚合；96 槽起 `allocateMemory` 失败。`slots >= 9` 才会进 matmul 路径（8 及以下走慢的 matvec，8 是个坑）。要求 `n_seq_max >= N`（同一个 `--batch-slots` 会同时设 `cp.n_seq_max`）以及 `n_ctx >= N × (prompt + T + 1)`；`--serve` 用同一个旗标就能让 `serve/server.py` 走多槽 |
 | `python port/tools/energy-ab.py EXE MODEL -- <引擎参数> + <引擎参数>` | **成对能耗**：一边跑引擎一边用 `energy-sample.ps1` 采样 Energy Meter，把样本裁到引擎自己打印的 `bench window`（只含被计时的解码步），报每 1000 token 的能耗。计数器是未标定标度，**只有同一次探针内的比值有效**；两次运行要生成相同的 token 数 |
 | `--parallel N` / `--batch N` | **`--serve` 的请求槽数**（`--batch` 是 `serve/replicas.py` 的写法）。N ≥ 2 时 `INFO` 报 `batch_slots=N`，引擎接受 `BGEN <slot> …` 并把 N 个请求放进同一批、每步各出一个 token，**一份权重**。每槽的 cache 是 `n_ctx / N`。**正确但当前没有收益**：32 槽、每请求 64 token 实测槽 0 与 solo **64/64 相同**，但每步 3178 ms ≈ 32 × 单条 99 ms，聚合 **1.00×**（`PERFORMANCE.md` §4；早先的 4.27× 是坏内核的读数，已撤回） |
 | `python port/tools/batch-serve.py EXE MODEL --slots N --tokens T --engine …` | **协议级批量**：同一进程先发一个 `GEN` 再发 N 个 `BGEN`，按同槽相邻 token 的时间差报每步时间（不含 prefill），并核对槽 0 的 token 流与单独运行是否逐 token 相同 |
@@ -88,7 +89,7 @@ build\bin\strata-vk.exe --gpu cpu --native D:\models\pack.gguf --tokens 9707 --n
 #    （token 流比较会漏掉整类错误：f16-accumulate 的 coopmat 内核就是在 32-token 比较下活了很久，见 §4.1）
 build\bin\strata-vk.exe --native M.gguf --tokens 248045,846,198,9419,248046,198,248045,74455,198 --n 1 --gpu cpu --dump-logits tmp-cpu.bin
 build\bin\strata-vk.exe --native M.gguf --tokens 248045,846,198,9419,248046,198,248045,74455,198 --n 1 --dump-logits tmp-gpu.bin
-#    期望：corr >= 0.999 且 argmax 相同；实测 27B 0.99967、35B 0.99906、Gyro-S 首 token 与 CPU 相同
+#    期望：corr >= 0.999 且 argmax 相同；实测 27B 0.99967、35B 0.99906、Gyro-S 0.9982（cooperative 默认开）/ 0.9983（关掉），argmax 均相同
 #    （模板化 prompt 的 id 用 tools/strata_tokenizer.py 的 Tokenizer.from_gguf(...).encode(tmpl, parse_special=True) 取）
 
 # 1) 参考 token 流（GPU 路径必须逐 token 相同）
@@ -97,13 +98,13 @@ build\bin\strata-vk.exe --native D:\models\pack.gguf --tokens 9707 --n 32
 
 # 2) 后端 oracle
 build\bin\test-backend-ops.exe -o MUL_MAT -b Vulkan0     # 期望 0 failures
-#    注意：它只覆盖默认管线；STRATA_VK_F16ACC=1 那条内核不进 oracle，所以第 0 条是它的唯一门禁
+#    注意：它只覆盖默认管线；STRATA_VK_F16ACC=1 的分组 cooperative 管线要单独跑 `-o MUL_MAT_ID`（实测 1168/1168 通过）
 
 # 2b) cooperative 内核的最小自检（不需要模型，秒级）。tile 退化时这一步是**全零**：
 #     `dev/cpu` 比值应落在 0.98-1.00；全零或 nmse 1.0 就是 MMA 循环没跑（PERFORMANCE.md §4.4/§4.5）
 $env:STRATA_VK_F16ACC='1'; build\bin\mm-probe.exe -b Vulkan0 -t q4_0 -m 512 -n 64 -k 512 --verify
 Remove-Item env:STRATA_VK_F16ACC
-#    已知：修好 tile 后这一步过，但整模型 `--dump-logits` 仍是 nan（形状/尾部闸门未补，§4.5）
+#    已知：2026-11-19 起整模型 `--dump-logits` 是有限的（trellis 类型的 cooperative shader 选错已修，PERFORMANCE.md 4.2）
 
 # 3) 文档与编码
 python port/tools/check-encoding.py        # 期望 0 damaged

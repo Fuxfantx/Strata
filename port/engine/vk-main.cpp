@@ -270,7 +270,7 @@ int main(int argc, char ** argv) {
     // created, the HTP mapping budget before the Hexagon backend reads it.  An unresolved Auto still applies the Vulkan
     // knobs, because Auto resolves to Vulkan whenever that backend exists.
     const ModelFacts facts = opt.version || opt.model.empty() ? ModelFacts{} : read_model_facts(opt.model);
-    apply_adreno_tuning(opt.gpu, facts.dense_matmul, facts.q20_only, facts.lowbit_pack, opt.shader_family);
+    apply_adreno_tuning(opt.gpu, facts.dense_matmul, facts.q20_only, facts.trellis > 0, opt.shader_family);
     Options opt_load = opt;
     opt_load.expert_bytes = facts.expert_bytes;
     opt_load.disk_bytes   = facts.disk_bytes;

@@ -55,7 +55,7 @@ private:
 
 // The Adreno tuning this build runs with.  Every value is measured on the X2-90 (port/docs/ADRENO.md); the engine sets a
 // variable only when the environment does not already name it, so a user can override any of them.
-void apply_adreno_tuning(GpuBackend backend, bool dense_model, bool q20_only = false, bool lowbit_pack = false,
+void apply_adreno_tuning(GpuBackend backend, bool dense_model, bool q20_only = false, bool trellis_pack = false,
                          int shaders = 0);
 
 // true when the policy above was the one that enabled STRATA_VK_F16ACC (and the user did not), so a placement that

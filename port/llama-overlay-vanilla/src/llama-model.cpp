@@ -2075,9 +2075,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
                 // this also allows using partial offloading when the model size exceeds the metal buffer
                 //     size, but not the RAM size
                 void * addr = ml.mappings.at(idx)->addr();
+                // a backend that imports host memory needs the base and the length aligned; Windows maps views on the
+                // 64 KiB allocation granularity, so only the ranges have to be rounded out here
+                const size_t host_align = 64u * 1024u;
+                const size_t file_size  = ml.files.at(idx)->size();
 
                 for (const auto & range : ml.get_mapping_ranges(idx, ctx)) {
-                    ggml_backend_buffer_t buf = ggml_backend_dev_buffer_from_host_ptr(dev, (char *) addr + range.first, range.last - range.first, max_size);
+                    size_t first = range.first & ~(host_align - 1);
+                    size_t last  = std::min((range.last + host_align - 1) & ~(host_align - 1), file_size);
+                    if (last <= first) {
+                        last = std::min(first + host_align, file_size);
+                    }
+                    ggml_backend_buffer_t buf = ggml_backend_dev_buffer_from_host_ptr(dev, (char *) addr + first, last - first, max_size);
                     if (buf == nullptr) {
                         throw std::runtime_error(format("unable to allocate %s buffer", ggml_backend_buft_name(buft)));
                     }

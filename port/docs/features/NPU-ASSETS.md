@@ -771,6 +771,9 @@ This section is inference from the facts above, not measurement.
   the SDK docs, the addons, and any working signing path for Windows - the only signing
   material is a self-signed public `.cer` whose private key is not on this machine, and the
   Hexagon SDK's own `signer.py` targets adb-connected Android devices.
+  **Superseded in part**: `features/NPU.md` records that the session now opens with the locally built skel and
+  that the refusal moved one layer down, to `dspqueue_create` (0x14); the signing question in this bullet was
+  written while `0x200` was still the wall. Read `features/NPU.md` first for the current state.
 - **QNN is on this machine but the port does not use it.** `QnnHtp.dll`, `QnnSystem.dll`,
   `libQnnHtpV73/V81*.so`, `QnnHtpPrepare.dll` and the driver-side
   `QnnHtpPrepareDrv.dll`/`libQnnHtpV81SkelDrv.so` are all present, but the port's NPU path

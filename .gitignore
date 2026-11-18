@@ -109,3 +109,6 @@ node_modules/
 # the fetched llama.cpp trees (production: third_party/llama.cpp; a leftover of an older pin is not source)
 /third_party/llama.cpp/
 /third_party/llama.cpp.oldpin/
+
+# the encoder's scratch directory (a space-free junction target for TEMP during tests)
+.tmp-encoder/

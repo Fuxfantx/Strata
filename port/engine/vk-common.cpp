@@ -16,6 +16,9 @@ std::mutex g_log_mu;
 // log is for; everything else comes back with STRATA_VK_VERBOSE=1.
 enum ggml_log_level g_last_kept = GGML_LOG_LEVEL_NONE;
 bool g_verbose = false;
+// One substring to watch for, and whether a kept line contained it.
+const char * g_watch = nullptr;
+bool g_watch_hit = false;
 
 void backend_log(enum ggml_log_level level, const char * text, void * user_data) {
     GGML_UNUSED(user_data);
@@ -26,11 +29,26 @@ void backend_log(enum ggml_log_level level, const char * text, void * user_data)
         return;
     }
     g_last_kept = level;
+    if (g_watch != nullptr && std::strstr(text, g_watch) != nullptr) g_watch_hit = true;
     std::lock_guard<std::mutex> lock(g_log_mu);
     std::fputs(text, stderr);
     std::fflush(stderr);
 }
 } // namespace
+
+void watch_backend_logs(const char * needle) {
+    g_watch = needle;
+    g_watch_hit = false;
+}
+
+bool backend_log_watch_hit() {
+    return g_watch_hit;
+}
+
+void clear_backend_log_watch() {
+    g_watch = nullptr;
+    g_watch_hit = false;
+}
 
 void quiet_backend_logs() {
     g_verbose = std::getenv("STRATA_VK_VERBOSE") != nullptr;

@@ -17,6 +17,11 @@ the withdrawal is itself a measurement. Documents with no remaining reader are d
 
 不需要读的：其余所有文档。它们写给改代码的人。
 
+### 任何读者 / Anyone — 想知道什么还不靠谱
+
+[`KNOWN-ISSUES.md`](KNOWN-ISSUES.md)：正确性覆盖、性能上限、设备与环境的已知问题，每条后面跟着说它成立的那个测量。
+`--gpu vulkan` 与 `--gpu cpu` 跑同一个 prompt 比 id，是区分"模型本来如此"和"移植改了它"最快的一步。
+
 ### 贡献者 / Contributor — 要让它更快
 
 按这个顺序读，前面的给出判据，后面的给出细节：
@@ -27,7 +32,9 @@ the withdrawal is itself a measurement. Documents with no remaining reader are d
 3. [`ADRENO.md`](ADRENO.md) — 这台机器的设备事实：带宽（含为什么到不了标称 228 GB/s）、Vulkan 特性、逐项测量。
 4. [`USAGE.md`](USAGE.md) §4 — 测量工具（`STRATA_VK_SKIP` 消融、`STRATA_CPU_TIME`、`mm-probe`、`bench.py`…）
    与 §5 门禁。
-5. [`features/`](features/) — 只在需要时读，结论已并入上面几份。
+5. [`features/`](features/) — 只在需要时读，结论已并入上面几份；图像那条线从
+   [`features/VISION.md`](features/VISION.md) 进。
+6. [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md) — 动手之前先看：有些"还能再快"的直觉已经在里面被数字否掉了。
 
 **先读 `PERFORMANCE.md` §4 再去试任何"显而易见"的优化**：那里每一条都附了否掉它的数字。
 
@@ -48,7 +55,10 @@ the withdrawal is itself a measurement. Documents with no remaining reader are d
 | [`ADRENO.md`](ADRENO.md) | Adreno X2-90 的设备事实与逐项 Vulkan 测量 | 贡献者 | 当前 |
 | [`MAINTAINER.md`](MAINTAINER.md) | vendored 树与 overlay 的机制、换 pin、门禁清单 | 维护者 | 当前 |
 | [`UPSTREAM-PATCHES.md`](UPSTREAM-PATCHES.md) | overlay 里每个补丁做什么、哪些值得回馈上游 | 维护者 | 当前 |
-| [`features/NPU-FEASIBILITY.md`](features/NPU-FEASIBILITY.md) | Hexagon 路径：怎么构建、值多少、为什么关 | 贡献者 | 记录（结论已并入 PERFORMANCE §4.1） |
+| [`features/VISION.md`](features/VISION.md) | 视觉：`ENC`/`.sve` 契约、三个后端、端到端实测与"没测什么" | 贡献者 | 当前 |
+| [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md) | 已知问题清单，每条附上让它成立的测量 | 全部 | 当前 |
+| [`features/NPU.md`](features/NPU.md) | Hexagon 当前状态（一页）：为什么开不了会话、QNN 那扇门、值多少 | 贡献者、维护者 | 当前 |
+| [`features/NPU-FEASIBILITY.md`](features/NPU-FEASIBILITY.md) | Hexagon 路径的完整调查记录（允许列表被证伪、tiled 路径挂死） | 维护者 | 记录 |
 | [`features/NPU-ASSETS.md`](features/NPU-ASSETS.md) | 本机有哪些 NPU/抓帧资产（SDK、QNN 运行时、skel、签名墙） | 维护者 | 记录 |
 | [`features/HYBRID.md`](features/HYBRID.md) | CPU/GPU/NPU 分工的完整实测矩阵 | 贡献者 | 记录（结论已并入 PERFORMANCE §2、§5） |
 | [`features/GDN-FUSION.md`](features/GDN-FUSION.md) | GDN 融合的设计与实测（哪些值得做、哪些不值得） | 贡献者 | 记录 |

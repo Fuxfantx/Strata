@@ -1869,7 +1869,27 @@ void ggml_hexagon_session::flush_batch(size_t min_ops) {
     op_batch->reset();
 }
 
+// Host-side cost of turning an opnode into a submission. STRATA_HTP_TIME=1 prints it periodically; the DSP-side
+// counters in htp-drv.cpp cover only the dspqueue calls, so this is the missing term.
+static double    g_enq_ms = 0.0;
+static long long g_enq_n  = 0;
+static double enq_now_ms() {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+struct enq_timer {
+    double t0 = enq_now_ms();
+    ~enq_timer() {
+        g_enq_ms += enq_now_ms() - t0;
+        ++g_enq_n;
+        if (getenv("STRATA_HTP_TIME")) {
+            GGML_LOG_INFO("[strata-htp] enq %lld %.1f ms total %.3f ms/op\n",
+                          g_enq_n, g_enq_ms, g_enq_ms / (double) g_enq_n);
+        }
+    }
+};
+
 void ggml_hexagon_session::enqueue_op(const htp_opnode & node) {
+    enq_timer _enq_timer;
     auto register_tensor = [&](const ggml_tensor * t) {
         if (!t) return;
         auto * sbuf = static_cast<ggml_hexagon_shared_buffer *>(t->buffer->context);

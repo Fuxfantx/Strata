@@ -34,7 +34,8 @@ SYCL 内核集，没有一个能在 Adreno GPU 上跑，所以这个分支只加
 | 引擎 | `port/engine/` | `strata-vk`：加载与放置、前缀复用、采样、token 循环、`--serve` 行协议、`--parallel` 请求槽 |
 | Overlay | `port/llama-overlay-vanilla/` | 相对 pin 住的 vanilla `llama.cpp` 的跟踪差异：模型家族（`qwen35`、`qwen35moe`、`qwen4exp`、trellis 包）、低位类型与它们的 Vulkan 内核、MTP/NextN 嫁接、loader 回退 |
 | CPU 与 GPU 同一个构建 | 同一份 | Vulkan 后端与 CPU 后端（含 repack 内核）都在 `strata-vk` 里，`--gpu` 选一个，`test-backend-ops` 能对比两者 |
-| 工具 | `port/tools/` | 拉取与构建脚本、测量工具（`batch-serve.py`、`energy-ab.py`、`two-serve.py`）、门禁（`check-encoding.py`、`audit-docs.py`、`check-pin.py`） |
+| 图片编码器 | `port/engine/strata-vision.cpp` | `strata-vision`：llama.cpp 的 mtmd + mmproj，说前端的 `ENC <image> <out>` 行，写出引擎读的 `.sve`；CPU 或 Vulkan，用 `--gpu` 选 |
+| 工具 | `port/tools/` | 拉取与构建脚本、测量工具（`batch-serve.py`、`energy-ab.py`、`two-serve.py`、`gguf-tokenizer.py`）、门禁（`check-encoding.py`、`audit-docs.py`、`check-pin.py`） |
 | 文档 | `port/docs/` | [索引](port/docs/README.md)：用法、性能、后端选项、维护者笔记、上游补丁、设备事实 |
 
 ## 快速开始
@@ -105,7 +106,13 @@ cooperative matrix 这条路**还不是又对又快**，原因都有测量：
 - **NPU**：Hexagon 路径能构建，但本驱动上开不出 DSP 会话（每个模块名都返回 `AEE_ERPC 0x200`），此前能测到的
   每种放置都比 GPU 慢。要复活它需要 QNN 后端，不是修 URI。
   见 [NPU-FEASIBILITY.md](port/docs/features/NPU-FEASIBILITY.md)。
-- **图片**：引擎只读文本；App 的图像路径需要上游的 `strata-vision` 编码器。
+- **图片**：通道已建好并端到端跑过——`port/engine/strata-vision.cpp` 是编码器（llama.cpp 的 mtmd + mmproj，CPU 或
+  Vulkan），引擎收 `--vision` 和带 embeddings 文件路径的 `GENI` 行，`serve/server.py` 会自己拉起它。**已验证的是
+  管道，不是回答**：带图请求返回 200、图片 token 进了 prompt，编码器单图 CPU 5.2 s / GPU 1.6 s、两后端 cosine
+  0.99997。**没验证的是"图片被理解"**：这个 pack 的 chat 回答本身就退化，而且 Vulkan 与 CPU 输出逐 token 相同
+  （即不是移植的问题），所以图片问答的好坏无法用回答来判。[features/VISION.md](port/docs/features/VISION.md)
+  写明了测了什么、没测什么。
+- **多槽 + 图片**：`BGENI`（多槽写法）对图片回答 `ERR`；图片只走一次一条的那条路。
 - **DeepSeek-V4.1**：本组件不支持，引擎在 serve 行上会明说。
 
 ## 文档

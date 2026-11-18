@@ -7,9 +7,11 @@
 //   mm-probe -b Vulkan0 -t q5_0 -m 896 -n 512 -k 896
 //   mm-probe -b OpenCL -t q4_K -m 4864 -n 512 -k 896 --reps 20
 //   mm-probe -b Vulkan0 --chain 256 -k 2560        # marginal cost of one dispatch
+//   mm-probe -b Vulkan0 -t tqk6 -m 2560 -n 1 -k 2560 --n-as 512 --n-used 10   # the MoE expert matvec
 //
-// MUL_MAT_ID (the MoE shape) is not covered here: its tensor-rank rules need the surrounding graph, and llama.cpp's
-// `test-backend-ops -o MUL_MAT` already exercises it for every type against a CPU reference.
+// `--n-as`/`--n-used` build the MUL_MAT_ID shape instead: as = [k, m, n_as], b = [k, n, n_used], ids = [n_used, n].
+// That is the kernel a Gyro-S decode step spends half its time in, and it is the reason this mode exists - the
+// end-to-end alternative is a 70 s model load per attempt.
 //
 // Two traps this tool has fallen into, both of which produce confident, wrong GB/s numbers:
 //   * one op per submit charges ~90 us of submit and fence to it, so an op whose work is 10 us measures 10% of its real
@@ -57,7 +59,10 @@ ggml_backend_dev_t find_device(const std::string & name) {
 
 ggml_type type_from_name(const std::string & name) {
     for (int t = 0; t < GGML_TYPE_COUNT; ++t) {
-        if (name == ggml_type_name((ggml_type) t)) return (ggml_type) t;
+        // The type table has holes (ids this fork does not name), and ggml_type_name returns null for them: comparing
+        // a std::string against that null used to segfault before -t tqk6 ever reached a tensor.
+        const char * tn = ggml_type_name((ggml_type) t);
+        if (tn != nullptr && name == tn) return (ggml_type) t;
     }
     return GGML_TYPE_COUNT;
 }
@@ -73,9 +78,29 @@ void fill_random(ggml_tensor * t, uint32_t seed) {
         return;
     }
     // Quantised blocks keep the scale sane: ggml_quantize_chunk maps an f32 matrix of the same shape into the type.
+    // The trellis types have no host-side from_float, and ggml_quantize_chunk aborts on them; any byte string is a
+    // valid trellis path (ggml-common.h), so those get random path bits and a finite scale (0.5) per block - which is
+    // also the shape a real pack has.
     if (ggml_is_quantized(t->type)) {
         std::vector<char> q(ggml_nbytes(t));
-        ggml_quantize_chunk(t->type, f.data(), q.data(), 0, ggml_nrows(t), t->ne[0], nullptr);
+        // The trellis types have no case in ggml_quantize_chunk's switch (it aborts), and their reference encoder is a
+        // search that would cost more than the measurement.  Any byte string is a valid trellis path
+        // (ggml-common.h), so those get random path bits and a finite scale (0.5) per block, which is the shape a real
+        // pack has.
+        const bool raw_fill = t->type == GGML_TYPE_TQK6 || t->type == GGML_TYPE_TQK7 ||
+                              t->type == GGML_TYPE_TQ2_T || t->type == GGML_TYPE_PTQ1_0;
+        if (!raw_fill) {
+            ggml_quantize_chunk(t->type, f.data(), q.data(), 0, ggml_nrows(t), t->ne[0], nullptr);
+        } else {
+            std::mt19937 rng_q(seed);
+            for (auto & b : q) b = (char) (rng_q() & 0xFFu);
+            const size_t bs = ggml_type_size(t->type);
+            const size_t nb = bs > 0 ? q.size() / bs : 0;
+            for (size_t i = 0; i < nb; ++i) {
+                q[i * bs]     = (char) 0x00;
+                q[i * bs + 1] = (char) 0x38;
+            }
+        }
         ggml_backend_tensor_set(t, q.data(), 0, q.size());
         return;
     }
@@ -87,6 +112,7 @@ void fill_random(ggml_tensor * t, uint32_t seed) {
 int main(int argc, char ** argv) {
     std::string backend_name, type_name = "f16";
     int64_t m = 4096, n = 1, k = 14336;
+    int64_t n_as = 0, n_used = 10;   // --n-as/--n-used: build MUL_MAT_ID instead of MUL_MAT
     int chain = 0;
     int handoff = 0;
     int ops = 1;
@@ -109,6 +135,8 @@ int main(int argc, char ** argv) {
         else if (a == "--scale")                scale = true;
         else if (a == "--reps")                 reps = std::atoi(next());
         else if (a == "--budget-ms")            budget_ms = std::atof(next());
+        else if (a == "--n-as")                  n_as = std::atoll(next());
+        else if (a == "--n-used")                n_used = std::atoll(next());
         else if (a == "--verify")               verify = true;
         else {
             std::fprintf(stderr, "unknown argument %s\n", a.c_str());
@@ -144,6 +172,7 @@ int main(int argc, char ** argv) {
     ggml_tensor * src0 = nullptr;
     ggml_tensor * src1 = nullptr;
     ggml_tensor * dst  = nullptr;
+    ggml_tensor * ids_t = nullptr;
 
     if (chain > 0) {
         // `--chain N`: N chained elementwise ops on a k-element f32 tensor, in one graph and one submit.  The marginal
@@ -169,6 +198,17 @@ int main(int argc, char ** argv) {
         src0 = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_F32, k, m);
         src1 = src0;
         dst  = ggml_scale(ctx.get(), src0, 0.5f);
+    } else if (n_as > 0) {
+        // MUL_MAT_ID (the MoE expert matmul): as = [k, m, n_as] is the whole expert stack, b = [k, n_used, n] the
+        // activations (one plane per expert slot), ids = [n_used, n] the routing.  dst = [m, n_used, n].
+        // ggml asserts ids->ne[1] == b->ne[2], which is the rank rule that kept this mode out of the probe until now.
+        ggml_tensor * as = ggml_new_tensor_3d(ctx.get(), type, k, m, n_as);
+        ggml_set_name(as, "as");
+        src0 = as;
+        src1 = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, k, n_used, n);
+        ids_t = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_I32, n_used, n);
+        ggml_set_name(ids_t, "ids");
+        dst = ggml_mul_mat_id(ctx.get(), as, src1, ids_t);
     } else {
         // `--ops K`: K independent matmuls in one submit, each over a DIFFERENT slice of the weight tensor.  Reusing one
         // slice measured 400-3000 GB/s, which is the L2 answering, not DRAM; distinct slices make the K dispatches read
@@ -199,6 +239,12 @@ int main(int argc, char ** argv) {
     } else {
         fill_random(src0, 1);
         fill_random(src1, 2);
+        if (ids_t != nullptr) {
+            std::vector<int32_t> hv((size_t) n_used * (size_t) n);
+            std::mt19937 rng(3);
+            for (auto & v : hv) v = (int32_t) (rng() % (uint32_t) n_as);
+            ggml_backend_tensor_set(ids_t, hv.data(), 0, hv.size() * sizeof(int32_t));
+        }
     }
 
     ggml_cgraph * gf = ggml_new_graph(ctx.get());
@@ -278,9 +324,13 @@ int main(int argc, char ** argv) {
     const double total = now_ms() - t0;
     const double per = total / iters;
 
-    const double flops = 2.0 * (double) m * (double) n * (double) k * (double) ops;
+    const bool is_id = n_as > 0;
+    const double flops = is_id ? 2.0 * (double) m * (double) n * (double) n_used * (double) k
+                              : 2.0 * (double) m * (double) n * (double) k * (double) ops;
     const double bytes = chain > 0 ? 3.0 * (double) k * 4.0 * (double) chain
                        : scale    ? 2.0 * (double) ggml_nbytes(dst)
+                       : is_id    ? ((double) ggml_nbytes(src0) * (double) n_used / (double) n_as
+                                     + (double) ggml_nbytes(src1) + (double) ggml_nbytes(dst))
                                    : ((double) ggml_nbytes(src0) + (double) ggml_nbytes(src1) + (double) ggml_nbytes(dst)) * ops;
 
     if (chain > 0 || scale) {
@@ -288,6 +338,15 @@ int main(int argc, char ** argv) {
                     ggml_backend_dev_name(dev), chain > 0 ? "add-chain" : "scale",
                     (long long) k, (long long) (chain > 0 ? 1 : m),
                     per, per * (chain > 0 ? 1000.0 / chain : 1.0), bytes / per / 1e6, iters);
+        ggml_backend_free(backend.get());
+        backend.release();
+        return 0;
+    }
+    if (is_id) {
+        std::printf("%s %-6s id m=%lld n=%lld k=%lld n_as=%lld n_used=%lld: %8.3f ms  %8.1f GFLOP/s  %7.1f GB/s  "
+                    "(%d iters)\n",
+                    ggml_backend_dev_name(dev), ggml_type_name(type), (long long) m, (long long) n, (long long) k,
+                    (long long) n_as, (long long) n_used, per, flops / per / 1e6, bytes / per / 1e6, iters);
         ggml_backend_free(backend.get());
         backend.release();
         return 0;

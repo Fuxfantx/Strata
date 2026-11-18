@@ -3097,54 +3097,77 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                     c_m == 64 && c_n == 64 &&
                     (64u + 64u) * (32u + 8u) * (uint32_t) sizeof(ggml_fp16_t) + c_m * c_n * (uint32_t) sizeof(float)
                         <= device->properties.limits.maxComputeSharedMemorySize;
-                static const ggml_type cmh_types[] = {
+                // Two kinds of quant shader exist.  The legacy and K-quant types share one SPIR-V that dispatches
+                // on the `MmTypeA` spec constant.  The trellis and LUT types have no `MmTypeA` branch in it and only
+                // exist as per-type SPIR-V: a pipeline for them built from the shared shader never writes `buf_a`,
+                // so the MMA reads uninitialised shared memory.  That is the model-wide `-inf`, and it is why the
+                // oracle passed - its trellis shapes are below the k >= 256 gate and never reached these pipelines.
+                static const ggml_type cm_generic_types[] = {
                     GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q8_0,
-                    GGML_TYPE_Q3_K, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K,
-                    GGML_TYPE_Q2_0, GGML_TYPE_TQK6, GGML_TYPE_PTQ1_0,
-                    GGML_TYPE_Q2_0, GGML_TYPE_TQK7, GGML_TYPE_PTQ1_0,
-                    GGML_TYPE_Q2_0, GGML_TYPE_TQ2_T, GGML_TYPE_PTQ1_0,
+                    GGML_TYPE_Q3_K, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_Q2_0,
                 };
+#define STRATA_CM1_PER_TYPE(X) \
+                X(GGML_TYPE_TQK6,   tqk6)   \
+                X(GGML_TYPE_TQK7,   tqk7)   \
+                X(GGML_TYPE_TQ2_T,  tq2_t)  \
+                X(GGML_TYPE_PTQ1_0, ptq1_0)
                 std::vector<vk_tile_config> tc;
                 if (cm_tile_fits) {
                     // { BLOCK_SIZE, BM, BN, BK, WM, WN, WMITER, TM, TN, TK, WARP, arch }
                     tc.push_back({ { 64, 64, 64, 32, 64, 64, 1, c_m, c_n, c_k, 64 }, { 64, 64, 1 }, 64 });
                 }
                 if (!tc.empty()) {
-                    // Only the GROUPED (MUL_MAT_ID) cooperative pipelines are created by default.  The dense ones are
-                    // a different shader and they are the ones that wrote `-inf` into exactly the first BM tile of
-                    // every dense matmul output (PERFORMANCE.md section 4.5), so leaving them out costs nothing while
-                    // the expert matmuls - the bulk of a MoE prefill - get the matrix cores.
-                    // STRATA_VK_F16ACC_DENSE=1 creates them too, for whoever repairs that staging path.
+                    // Only the GROUPED (MUL_MAT_ID) cooperative pipelines are created by default: the expert matmuls
+                    // are the bulk of a MoE prefill.  The dense ones are opt-in (STRATA_VK_F16ACC_DENSE=1) because
+                    // they measure neutral here and add a pipeline per type.
                     const bool want_dense_coop = std::getenv("STRATA_VK_F16ACC_DENSE") != nullptr;
-                    for (ggml_type tt : cmh_types) {
-                        if (!want_dense_coop) {
-                            break;
-                        }
-                        spec_fn_t sp = [&](const std::vector<uint32_t> & wt, bool al) {
-                            return ggml_vk_mul_mm_spec_quant(wt, al, (uint32_t) tt);
-                        };
-                        create_mm_pipelines({ tt, GGML_TYPE_F16, false, true }, tc, "matmul_coop_f16_f16acc",
-                                            matmul_quant_f16_f16acc_cm1_len, matmul_quant_f16_f16acc_cm1_data,
-                                            sizeof(vk_mat_mat_push_constants), 3, sp, false, true, 0, true, false);
-                    }
-                    // The grouped variant as well: every MoE pack runs in fp16 mode, and without these the experts stay on
-                    // the dp4a path (the b-type log shows `prefer_f16_b=1 f16_avail=0` for every grouped matmul).
-                    // STRATA_VK_F16ACC_NOID=1 skips these, which is the experiment that says whether the grouped
-                    // cooperative kernel is the source of the `-inf` (PERFORMANCE.md section 4.5).
+                    // STRATA_VK_F16ACC_NOID=1 skips the grouped ones, which is the A/B that isolates them.
                     const bool want_id_coop = std::getenv("STRATA_VK_F16ACC_NOID") == nullptr;
-                    for (ggml_type tt : cmh_types) {
-                        if (!want_id_coop) {
-                            break;
+                    for (ggml_type tt : cm_generic_types) {
+                        if (want_dense_coop) {
+                            spec_fn_t sp = [&](const std::vector<uint32_t> & wt, bool al) {
+                                return ggml_vk_mul_mm_spec_quant(wt, al, (uint32_t) tt);
+                            };
+                            create_mm_pipelines({ tt, GGML_TYPE_F16, false, true }, tc, "matmul_coop_f16_f16acc",
+                                                matmul_quant_f16_f16acc_cm1_len, matmul_quant_f16_f16acc_cm1_data,
+                                                sizeof(vk_mat_mat_push_constants), 3, sp, false, true, 0, true, false);
                         }
-                        spec_fn_t spi = [&](const std::vector<uint32_t> & wt, bool al) {
-                            return ggml_vk_mul_mm_spec_quant(wt, al, (uint32_t) tt);
-                        };
-                        create_mm_pipelines({ tt, GGML_TYPE_F16, true, true }, tc, "matmul_id_coop_f16_f16acc",
-                                            matmul_id_subgroup_quant_f16_f16acc_cm1_len,
-                                            matmul_id_subgroup_quant_f16_f16acc_cm1_data,
-                                            sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count, spi,
-                                            false, true, 0, true, false);
+                        if (want_id_coop) {
+                            spec_fn_t spi = [&](const std::vector<uint32_t> & wt, bool al) {
+                                return ggml_vk_mul_mm_spec_quant(wt, al, (uint32_t) tt);
+                            };
+                            create_mm_pipelines({ tt, GGML_TYPE_F16, true, true }, tc, "matmul_id_coop_f16_f16acc",
+                                                matmul_id_subgroup_quant_f16_f16acc_cm1_len,
+                                                matmul_id_subgroup_quant_f16_f16acc_cm1_data,
+                                                sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count, spi,
+                                                false, true, 0, true, false);
+                        }
                     }
+                    {
+                        // Per-type SPIR-V has no `MmTypeA`, so one spec function serves every one of them.
+                        spec_fn_t sp = [&](const std::vector<uint32_t> & wt, bool al) {
+                            return ggml_vk_mul_mm_spec(wt, al);
+                        };
+                        if (want_dense_coop) {
+#define STRATA_CM1_DENSE(TYPE, tstr) \
+                            create_mm_pipelines({ TYPE, GGML_TYPE_F16, false, true }, tc, "matmul_coop_f16_f16acc", \
+                                                matmul_##tstr##_f16_f16acc_cm1_len, matmul_##tstr##_f16_f16acc_cm1_data, \
+                                                sizeof(vk_mat_mat_push_constants), 3, sp, false, true, 0, true, false);
+                            STRATA_CM1_PER_TYPE(STRATA_CM1_DENSE)
+#undef STRATA_CM1_DENSE
+                        }
+                        if (want_id_coop) {
+#define STRATA_CM1_ID(TYPE, tstr) \
+                            create_mm_pipelines({ TYPE, GGML_TYPE_F16, true, true }, tc, "matmul_id_coop_f16_f16acc", \
+                                                matmul_id_subgroup_##tstr##_f16_f16acc_cm1_len, \
+                                                matmul_id_subgroup_##tstr##_f16_f16acc_cm1_data, \
+                                                sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count, sp, \
+                                                false, true, 0, true, false);
+                            STRATA_CM1_PER_TYPE(STRATA_CM1_ID)
+#undef STRATA_CM1_ID
+                        }
+                    }
+#undef STRATA_CM1_PER_TYPE
                 }
             }
 

@@ -39,6 +39,24 @@ endif()
 # (`-DGGML_HEXAGON=ON` plus HEXAGON_SDK_ROOT).  The engine finds the device at run time and moves the dense tensors
 # onto it (vk-devices.cpp), so a tree without the backend is a complete engine that simply reports `npu=none`.
 
+# strata-vision: the picture reader the front end spawns (serve/server.py, class Vision).  It is llama.cpp's mtmd on
+# the mmproj file, speaking "ENC <image> <output>" -> "OK <n_tokens>" and writing the .sve record the engine reads on
+# its GENI/BGENI line (port/docs/features/VISION.md).  Built only when the tree carries mtmd (LLAMA_BUILD_TOOLS), and
+# opt-in at run time: an engine started without --mmproj behaves exactly as before.
+# Not "if (TARGET mtmd)": examples/ is configured before tools/, so the target does not exist yet at this point in
+# the configure; the source file does, and the link line is resolved after every subdirectory has been added.
+if (LLAMA_BUILD_TOOLS AND EXISTS ${CMAKE_SOURCE_DIR}/tools/mtmd/mtmd.cpp)
+  add_executable(strata-vision strata-vision.cpp)
+  target_link_libraries(strata-vision PRIVATE mtmd llama ${CMAKE_THREAD_LIBS_INIT})
+  target_compile_features(strata-vision PRIVATE cxx_std_17)
+  if (MSVC)
+    target_compile_options(strata-vision PRIVATE /utf-8)
+  endif()
+  install(TARGETS strata-vision RUNTIME)
+else()
+  message(STATUS "strata-vision: not built (this llama.cpp tree has no mtmd target; configure with LLAMA_BUILD_TOOLS=ON)")
+endif()
+
 # mm-probe: one mul_mat shape, one backend, timed in isolation.  Every kernel decision in this port is measured with it
 # (port/docs/ADRENO.md), because the backend's own per-op table brackets more than the kernel.
 # requant-tensor: write a companion GGUF with a few tensors requantised, since llama-quantize cannot filter what it

@@ -12,13 +12,18 @@ namespace {
 // for the model path.
 const char * const kIgnoredValueFlags[] = {
     "--batch", "--slots", "--draft", "--draft-vocab", "--draft-conf", "--draft-max", "--spec", "--resident-budget-gib",
-    "--resident-experts", "--vram-reserve", "--pool-workers", "--hybrid-rows", "--batch-groups", "--gpu", "--gpus",
-    "--tensor-split", "--defrag-thold", "--tune", "--vision", "--vision-tokens", "--rope-scaling", "--rope-scale",
+    // not "--gpu": that one is honoured below (it picks the backend).  It sat in this list too, unreachable only because
+    // the chain above matched first, which would have turned "--gpu cpu" into a silent no-op on a reorder.
+    "--resident-experts", "--vram-reserve", "--pool-workers", "--hybrid-rows", "--batch-groups", "--gpus",
+    // not "--vision": that one is a bare flag the front end passes (serve/server.py appends it for a config with a
+    // "vision" section), and this build honours it - see the parser below.  A value-taking entry here would have eaten
+    // the flag after it.
+    "--tensor-split", "--defrag-thold", "--tune", "--vision-tokens", "--rope-scaling", "--rope-scale",
     "--seed", "--temp", "--top-k", "--top-p", "--min-p", "--repeat-penalty", "--presence-penalty",
     "--frequency-penalty", "--penalty-last-n", "--expert-vram", "--prefill-head", "--serve-log", "--session",
     "--session-dir", "--api-key", "--host", "--port", "--draft-window", "--dflash", "--lookup-max-t",
     "--ubatch-size", "--logits-file", "--threads-batch", "--numa", "--device",
-    "--mmproj", "--image-max-tokens", "--chat-template", "--reasoning", "--effort", "--sym", "--chat-template-file",
+    "--image-max-tokens", "--chat-template", "--reasoning", "--effort", "--sym", "--chat-template-file",
     "--slot", "--split-mode", "--main-gpu", "--session-file", "--dump-logits",
 };
 
@@ -124,6 +129,10 @@ Options parse_args(int argc, char ** argv) {
         else if (a == "--prompt" || a == "-p") { if (take()) o.prompt = v; }
         else if (a == "--kv" || a == "--kv-type" || a == "--cache-type-k" || a == "--cache-type-v") { if (take()) o.kv = v; }
         else if (a == "--dry-run") { o.dry_run = true; }
+        else if (a == "--mmproj") { if (take()) o.mmproj = v; }
+        // `--vision` is the front end's switch for pictures, and it is passed to the ENGINE as well as to the reader:
+        // the engine only needs to know that a GENI line may carry them, because the projector runs in its own process.
+        else if (a == "--vision") { o.vision = true; }
         else if (a == "--mtp") { if (take()) o.mtp = v; }
         else if (a == "--lazy-mode") { if (take()) o.lazy = parse_tri(v); }
         else if (a == "--load-mode") { if (take()) { o.load_mode = v; o.load_mode_set = true; } }

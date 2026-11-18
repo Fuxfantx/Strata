@@ -197,20 +197,23 @@ const char * dev_kind(enum ggml_backend_dev_type type) {    switch (type) {
 struct ModelPolicy {
     bool fp32_shaders = false;   // dense packs: the fp32 shaders are up to 2.2x faster on the int-dot mat-mat
     bool int_dot_off  = false;   // q2_0-only packs: their dp4a fp16 shader crashes this driver on a multi-token prefill
-    // The f16-accumulate cooperative matrix was on everywhere on the strength of "identical token streams".  That is not
-    // true on this driver: against the CPU backend the logits correlate 0.02 and the top token changes (PERFORMANCE.md
-    // 20.50).  Off by default; STRATA_VK_F16ACC=1 still selects it for a shape-only benchmark.
+    // The f16-accumulate cooperative matrix, for the packs whose experts are trellis-coded.  It was off because
+    // every such pack produced `-inf`: the trellis types have no `MmTypeA` case in the shared quant shader, so
+    // their cooperative pipelines were built from a shader that never wrote the staged A block (fixed
+    // 2026-11-19, the per-type `matmul_id_coop_f16_f16acc` SPIR-V).  It is the prefill: pp512
+    // 42.51 -> 85.55 tok/s, the 32 slots 25.47 -> 31.09, and the logits correlate like the default path.
     bool coop_f16acc  = false;
 };
 
-static ModelPolicy decide_policy(bool dense_model, bool q20_only) {
+static ModelPolicy decide_policy(bool dense_model, bool q20_only, bool trellis_pack) {
     ModelPolicy p;
     p.fp32_shaders = dense_model;
     p.int_dot_off  = q20_only && !p.fp32_shaders;
+    p.coop_f16acc  = trellis_pack;
     return p;
 }
 
-void apply_adreno_tuning(GpuBackend backend, bool dense_model, bool q20_only, bool lowbit_pack, int shaders) {
+void apply_adreno_tuning(GpuBackend backend, bool dense_model, bool q20_only, bool trellis_pack, int shaders) {
     // STRATA_VK_ADRENO_TUNING=0 runs every knob at the backend's own default, which is what a sweep needs to measure the
     // defaults against the tuning.
     if (const char * off = std::getenv("STRATA_VK_ADRENO_TUNING"); off != nullptr && std::strcmp(off, "0") == 0) {
@@ -220,7 +223,7 @@ void apply_adreno_tuning(GpuBackend backend, bool dense_model, bool q20_only, bo
     if (backend != GpuBackend::Vulkan && backend != GpuBackend::Auto) return;
     for (const TuningKnob & k : kVulkanTuning) set_env_once(k.name, "1");
 
-    ModelPolicy policy = decide_policy(dense_model, q20_only);
+    ModelPolicy policy = decide_policy(dense_model, q20_only, trellis_pack);
     // The shader family is a real trade, so it is a first-class choice: f16 shaders are the better decode, fp32 shaders
     // the better prefill on this device (Gyro-S 10.7 against 5.5 decode, 19.3 against 46.6 prefill, PERFORMANCE.md §1).
     // `--shader-family` wins; STRATA_VK_F16=on|off stays for an A/B without touching the command line.
@@ -232,7 +235,7 @@ void apply_adreno_tuning(GpuBackend backend, bool dense_model, bool q20_only, bo
         policy.fp32_shaders = std::strcmp(f, "on") != 0;
         policy.int_dot_off  = q20_only && !policy.fp32_shaders;
     }
-    (void) lowbit_pack;   // kept for the call site's sake: the cooperative path is the default for every pack
+    // The cooperative path is per-pack now: decide_policy owns the choice.
 
     if (policy.fp32_shaders) {
         for (const TuningKnob & k : kIntDotTuning) set_env_once(k.name, "1");
@@ -384,6 +387,18 @@ ModelFacts read_model_facts(const std::string & path) {
     if (const int64_t id = gguf_find_key(g, "general.architecture"); id >= 0 && gguf_get_val_str(g, id) != nullptr) {
         std::strncpy(arch, gguf_get_val_str(g, id), sizeof(arch) - 1);
     }
+    // DeepSeek: this Strata no longer runs it (strata_control/retired.py is the front end's half of the same rule).
+    // The front ends refuse a DeepSeek config, folder or saved launch before an engine starts; this is the copy that
+    // covers a direct `strata-vk --native`, which would otherwise load it and then have no kernels that fit it.  The
+    // sentence is the owner-approved one from retired.py (D5), verbatim, so the two halves say the same thing.
+    if (std::strncmp(arch, "deepseek", 8) == 0) {
+        gguf_free(g);
+        if (meta != nullptr) ggml_free(meta);
+        std::fprintf(stderr,
+                     "[strata-vk] this config runs a DeepSeek model (arch %s). This version of Strata no longer runs "
+                     "DeepSeek models, so the server stops here. The model files were not changed.\n", arch);
+        std::exit(2);
+    }
     const std::string prefix = arch[0] != '\0' ? arch : "llama";
     if (const int64_t id = gguf_find_key(g, (prefix + ".block_count").c_str()); id >= 0) {
         f.block_count = (int) gguf_get_val_u32(g, id);
@@ -412,6 +427,7 @@ ModelFacts read_model_facts(const std::string & path) {
                 ++f.low2;
                 break;
             case GGML_TYPE_TQ2_T: case GGML_TYPE_PTQ1_0: case GGML_TYPE_TQ1_0: case GGML_TYPE_TQ2_0:
+            case GGML_TYPE_TQK6:  case GGML_TYPE_TQK7:
                 ++f.trellis;
                 break;
             default:

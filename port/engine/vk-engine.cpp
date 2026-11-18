@@ -91,6 +91,41 @@ bool Engine::decode(const llama_token * toks, int n, int pos0, bool want_logits)
     return true;
 }
 
+// The id of the token the front end writes once per picture width: the model's own <|image_pad|>.  A model without one
+// (no projector, or another family) answers -1 and the request is refused rather than guessed at.
+int Engine::image_pad_token() const {
+    if (vocab_ == nullptr) return -1;
+    static const char * kPad = "<|image_pad|>";
+    llama_token tok = 0;
+    const int n = llama_tokenize(vocab_, kPad, (int32_t) std::strlen(kPad), &tok, 1, false, true);
+    if (n != 1) return -1;
+    return (int) tok;
+}
+
+bool Engine::decode_embd(const float * embd, int n, int pos0, bool want_logits) {
+    if (n_embd_ <= 0) { logf("[strata-vk] picture rows without an embedding width\n"); return false; }
+    if (batch_embd_cap_ < n) {
+        // rows are read in n_batch-sized groups, so this happens at most once per context
+        if (batch_embd_.token != nullptr || batch_embd_.embd != nullptr) llama_batch_free(batch_embd_);
+        batch_embd_ = llama_batch_init(n, n_embd_, 1);
+        batch_embd_cap_ = n;
+    }
+    std::memcpy(batch_embd_.embd, embd, sizeof(float) * (size_t) n * (size_t) n_embd_);
+    for (int i = 0; i < n; ++i) {
+        batch_embd_.pos[i]       = pos0 + i;
+        batch_embd_.n_seq_id[i]  = 1;
+        batch_embd_.seq_id[i][0] = 0;
+        batch_embd_.logits[i]    = (want_logits && i == n - 1) ? 1 : 0;
+    }
+    batch_embd_.n_tokens = n;
+    const int rc = llama_decode(ctx_, batch_embd_);
+    if (rc != 0) {
+        logf("[strata-vk] llama_decode (picture) failed: %d (n=%d pos=%d)\n", rc, n, pos0);
+        return false;
+    }
+    return true;
+}
+
 bool Engine::decode_all(const llama_token * toks, int n, int pos0) {
     if (n > batch_cap_) { logf("[strata-vk] batch of %d exceeds the %d rows allocated; refusing\n", n, batch_cap_); return false; }
     for (int i = 0; i < n; ++i) {

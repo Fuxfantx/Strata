@@ -102,4 +102,9 @@ void out_line(const std::string & line);
 /** Keep warnings and errors from llama.cpp/ggml, drop the per-graph debug chatter unless STRATA_VK_VERBOSE is set. */
 void quiet_backend_logs();
 
+// Watch llama.cpp's warning channel for one substring (see the MTP head's device split in vk-engine-load.cpp).
+void watch_backend_logs(const char * needle);
+bool backend_log_watch_hit();
+void clear_backend_log_watch();
+
 } // namespace strata

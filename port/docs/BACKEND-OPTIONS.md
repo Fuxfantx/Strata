@@ -8,7 +8,7 @@ Every number here is measured on this machine; the method and the full tables ar
 
 | 后端 | 怎么选 | 当前状态（本机实测，`Gyro-S-TQ1_0`，正确内核） | 结论 |
 | --- | --- | --- | --- |
-| **Vulkan**（Adreno X2-90） | 默认，或 `--gpu vulkan` | decode 10.12 tok/s，prefill pp512 **49.80** | 支持；**默认就是 prefill 优先且 decode 不变的配置**（2026-11-18） |
+| **Vulkan**（Adreno X2-90） | 默认，或 `--gpu vulkan` | decode 10.25 tok/s，prefill pp512 **85.55**，32 槽 **31.09** | 支持；**默认就是 prefill 优先且 decode 不变的配置**（2026-11-19） |
 | **CPU**（18×Oryon，i8mm） | `--gpu cpu` | decode **11.34**，prefill 21.06 | 支持；这台机器单流最快 |
 | **HTP**（Hexagon NPU） | `--npu dense` 等 | 能构建、能跑完，但每种放置都更慢（27B decode 4.1-4.7 对 7.3；35B 10-14 对 39） | 默认关闭 |
 | OpenCL（同硬件另一驱动） | 无 | 未测 | 不在计划内 |
@@ -26,8 +26,8 @@ Every number here is measured on this machine; the method and the full tables ar
 | int-dot（dp4a）mat-mat | 默认开；只有 `q2_0`-only 的包关掉（那个 dp4a fp16 shader 在多 token prefill 上会让驱动崩） | prefill 数倍 |
 | fp32 shaders | **默认不再需要**：int-dot 的 **mat-mat** 已经固定取自 fp32 模块，而 mat-vec 与 elementwise 留在 f16 模块（2026-11-18，pp512 16.01 → 49.80、tg16 不变）。`--shader-family fp32` 现在只把 elementwise 也换成 fp32，因此是纯损失（decode 减半，prefill 还更慢） | Gyro-S pp512 49.80 对 16.01 |
 | flash attention | `n_ctx >= 4096` 且层数 >= 32 默认开；短上下文 decode −32%，所以由调用方决定 | 2048 上下文 4.5× prefill |
-| cooperative matrix f32-accumulate | 默认开（正确路径） | 与 CPU logits 相关性 0.999 |
-| cooperative matrix **f16**-accumulate | **默认关** | logits 相关性 0.02，输出错（`PERFORMANCE.md` §4.1） |
+| cooperative matrix **f16**-accumulate（分组 = 专家） | **默认开**（trellis 包，按 GGUF 头决定） | 2026-11-19 修好：trellis 类型原先被挂到不能解码它们的通用量化 shader 上，`buf_a` 从不写入 ⇒ 整模型 `-inf`。改成按类型 SPIR-V 后 pp512 42.51 → 85.55、32 槽 25.47 → 31.09，logits corr 0.9982 / argmax 相同 / 32-token 流逐 token 相同（`PERFORMANCE.md` §4.2） |
+| cooperative matrix f16-accumulate（dense） | **默认关** | 净损失：pp512 80.98 对 85.55（`STRATA_VK_F16ACC_DENSE=1` 可开） |
 | 专家驻留 | host 专家 + 设备侧 `--moe-cache-size` | 47.6 GiB 上跑 54 GiB 包 |
 
 **用户会想动的旋钮**：
@@ -40,8 +40,8 @@ Every number here is measured on this machine; the method and the full tables ar
 --load-mode mmap|direct       # mmap 是默认；direct 峰值会超过 47.6 GiB
 --moe-cache-size MiB          # 设备侧专家缓存
 STRATA_VK_F16=off             # 与 --shader-family fp32 等价，留给不碰命令行的 A/B
-STRATA_VK_F16ACC=1            # 只用于"只看形状"的基准：输出是错的
-```
+STRATA_VK_F16ACC=0            # 关掉 cooperative（A/B 用；默认按模型打开）
+STRATA_VK_F16ACC_DENSE=1      # 也开 dense 那半：实测更慢，保留给后续调
 
 ## 3. CPU
 
