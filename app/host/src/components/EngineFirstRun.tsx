@@ -40,7 +40,7 @@ export interface ControlStatusEngine {
 
 /**
  * Decide whether the first-run Qwen engine download card should open.
- * Returns `false` when a shape engine (such as `strata-inkling` or `strata-hy4`) is already installed and usable,
+ * Returns `false` when an engine Control already knows (a shape engine included) is installed and usable,
  * so users who only installed a shape engine are not prompted to download the 490 MB Qwen engine.
  */
 export function engineNeededFromStatus(s: ControlStatusEngine | null | undefined): boolean | null {

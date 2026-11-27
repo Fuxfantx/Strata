@@ -1,4 +1,4 @@
-"""Changing the model must not carry a Drafting choice to a model that has none (owner, 2026-11-02): the Coder, Swift and NVFP4 builds have only the MTP.
+"""Changing the model must not carry a Drafting choice to a model that has none (owner, 2026-11-02): the Coder and Swift builds have only the MTP.
 The Terminal's wizard goes back to Auto when the model changes to one of them, and the Q4_0-selector pack is made only where the installed engine reads it.
 """
 
@@ -23,7 +23,7 @@ class TheChoiceStaysWithItsFamily(unittest.TestCase):
                 self.assertEqual(modelstate.drafting_for_family(choice, family), choice, (family, choice))
 
     def test_every_other_family_goes_back_to_auto(self):
-        for family in ("coder", "swift", "nvfp4"):
+        for family in ("coder", "swift"):
             for choice in ("auto", "mtp", "dflash2", "off"):
                 self.assertIsNone(modelstate.drafting_for_family(choice, family), (family, choice))
         self.assertEqual(modelstate.drafting_for_family("mtp", None), "mtp", "no family yet: nothing to decide")

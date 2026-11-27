@@ -27,7 +27,10 @@ BACKEND_MATRIX: dict[str, tuple[str, ...]] = {
     "cuda": ("windows-x86_64", "linux-x86_64", "linux-aarch64"),   # linux-aarch64: the NVIDIA DGX Spark (GB10, sm_121) only
     "hip": ("windows-x86_64", "linux-x86_64"),
     "sycl": ("linux-x86_64",),
-    "cpu": ("macos-arm64", "macos-x86_64", "windows-x86_64", "linux-x86_64"),
+    # windows-arm64-vulkan: this branch carries its own Vulkan engine (strata-vk) for Snapdragon / Adreno PCs, and the
+    # processor fallback beside it.  No other combination of its own.
+    "vulkan": ("windows-arm64",),
+    "cpu": ("macos-arm64", "macos-x86_64", "windows-x86_64", "linux-x86_64", "windows-arm64"),
 }
 
 def host_platform() -> str:

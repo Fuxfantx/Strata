@@ -110,30 +110,13 @@ function saveApiKey(notify = false) {
 $("api-key").oninput = () => saveApiKey();
 $("api-key").onchange = () => saveApiKey(true);
 
-let health = {model: "strata", family: null, images: false, max_context: 0};
-function thinkingForFamily(v, family = health && health.family) {
-  if (family === "hy4") {
-    if (v === "none" || v === "no_think" || v === "off") return "none";
-    if (v === "max" || v === "xhigh") return "max";
-    return "high";
-  }
-  if (family === "inkling2") return v === "max" ? "high" : (v || "low");     // the model's own levels: none (0), low (0.2), medium (0.7), high (0.9)
+let health = {model: "strata", images: false, max_context: 0};
+function thinkingForFamily(v) {
   return v === "max" ? "high" : (v || "high");
 }
 function syncThinkingUI() {
-  const fam = health && health.family;
-  const isHy4 = fam === "hy4";
   if ($("thinking-field")) $("thinking-field").hidden = false;
   if ($("show-thinking-row")) $("show-thinking-row").hidden = false;
-  const seg = $("s-thinking");
-  if (seg) {
-    seg.classList.toggle("seg--3", isHy4);
-    for (const b of seg.children) {
-      const v = b.dataset.v;
-      if (v === "low" || v === "medium") b.hidden = isHy4;
-      else if (v === "max") b.hidden = !isHy4;
-    }
-  }
 }
 // the texts that depend on what this server offers: the empty chat's line and the attach button's hint
 function renderEmptyChat() {
@@ -144,8 +127,6 @@ function renderEmptyChat() {
 async function loadHealth() {
   try {
     health = await (await fetch("health")).json();
-    // Inkling-2-Mini: a page that never saved a thinking level starts at the server's own default level (low), not at the Qwen default (high)
-    if (health.family === "inkling2" && typeof settings !== "undefined" && !(store.get("sampling", {}) || {}).thinking) settings.thinking = "low";
     renderEmptyChat();
     syncThinkingUI();
     $("tab-btn-images").hidden = !health.image_generation;
@@ -440,7 +421,7 @@ function renderConvCache(c) {
   ]);
   $("cc-note").textContent = c.enabled
     ? "A request that continues a parked conversation gets its state back instead of reading it again; the oldest goes when the slots or the memory are full."
-    : "The engine keeps the last conversation's state, so a follow-up reads only what is new. To keep several conversations (agents taking turns), add \"--conversation-cache-mib\", \"8192\" to the run config's args (docs/DETAILS.md).";
+    : "The engine keeps the last conversation's state, so a follow-up reads only what is new. To keep several conversations (agents taking turns), add \"--conversation-cache-mib\", \"8192\" to the run config's args.";
 }
 
 function renderTotals(t) {
@@ -1733,12 +1714,7 @@ async function loadShared() {
   $("s-share").setAttribute("aria-checked", String(sharedOn));
 }
 function sharedDefaults(s) {
-  const fam = typeof health !== "undefined" && health ? health.family : null;
-  const eff = fam === "hy4"
-    ? (s.thinking === "none" || s.thinking === "no_think" || s.thinking === "off" ? "none"
-       : (s.thinking === "max" || s.thinking === "xhigh") ? "max" : "high")
-    : (s.thinking === "max" ? "high" : s.thinking);
-  const d = {reasoning_effort: eff};
+  const d = {reasoning_effort: s.thinking === "max" ? "high" : s.thinking};
   if (!(+s.temperature > 0)) d.temperature = 0;
   else if (!samplingUntouched(s)) Object.assign(d, {temperature: +s.temperature, top_p: +s.top_p, top_k: +s.top_k});
   if (s.seed) d.seed = +s.seed;

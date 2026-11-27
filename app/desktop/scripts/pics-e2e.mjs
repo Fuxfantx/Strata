@@ -8,7 +8,7 @@
  *      of another style each get a plain refusal (409) that says how to fix it; ticking "This model reads pictures" lets the picture through;
  *   3. a local model (unless --skip-local): Download and prepare with Read pictures ON, load, and a picture through the app's own chat.
  *
- *   node pics-e2e.mjs --install <node/ host/ control/> --components <engine components> --work <scratch> --image shapes.png \
+ * node pics-e2e.mjs --install <node/ host/ control/> --components <engine components> --work <scratch> --image \
  *   Also: --silent <url> (a server whose model list says nothing about pictures: ON by default), --agent (the same picture through the agent; needs a Harness)
  *        --vlm http://127.0.0.1:18090/v1 --vlm-model smolvlm --text-only http://127.0.0.1:18091/v1 [--skip-local --family qwen --model IQ3_XXS --data <folder> --device cpu]
  */

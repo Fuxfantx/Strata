@@ -1,0 +1,156 @@
+#version 450
+
+#extension GL_EXT_control_flow_attributes : require
+
+// Fan one stream back out to hc streams and add the combination-weighted
+// residuals:
+//
+//   dst[i0, idst, it] = x[i0, it]*post[idst, it]
+//                     + sum_isrc residual[i0, isrc, it]*comb[idst, isrc, it]
+//
+// HAS_COMB == 0: identity mixing, each stream keeps its own residual:
+//
+//   dst[i0, idst, it] = x[i0, it]*post[idst, it] + residual[i0, idst, it]
+
+layout(constant_id = 0) const uint BLOCK_SIZE = 256;
+layout(constant_id = 1) const uint HAS_COMB = 1;
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+#if defined(PARAM_BLOCK_ENABLED)
+#define PARAM_BLOCK_BINDING 12
+layout (binding = PARAM_BLOCK_BINDING, std430) readonly buffer parameter
+#else
+layout(push_constant) uniform parameter
+#endif
+{
+    uint n_embd;
+    uint n_tokens;
+
+    uint nbx0; uint nbx1;              // x
+    uint nbr0; uint nbr1; uint nbr2;   // residual
+    uint nbp0; uint nbp1;              // post
+    uint nbc0; uint nbc1; uint nbc2;   // comb
+    uint nbd0; uint nbd1; uint nbd2;   // dst
+
+    uint x_offset;
+    uint r_offset;
+    uint p_offset;
+    uint c_offset;
+    uint d_offset;
+
+    uint gate;               // post = gate_scale_out*sigmoid(gate_scale_in*p)
+    float gate_scale_in;
+    float gate_scale_out;
+};
+
+layout(binding = 0, std430) readonly buffer X { float data_x[]; };
+layout(binding = 1, std430) readonly buffer R { float data_r[]; };
+layout(binding = 2, std430) readonly buffer P { float data_p[]; };
+layout(binding = 3, std430) readonly buffer C { float data_c[]; };
+layout(binding = 4, std430) writeonly buffer D { float data_d[]; };
+
+const uint hc = 4;
+
+shared float post_s[hc];
+shared float comb_s[hc * hc];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint it  = gl_WorkGroupID.y;
+
+    if (tid < hc) {
+        const float p = data_p[p_offset + tid * nbp0 + it * nbp1];
+        post_s[tid] = gate != 0 ? (1.0f / (1.0f + exp(-(p * gate_scale_in)))) * gate_scale_out : p;
+    }
+    #if defined(HC_POST_COMB)
+    if (tid < hc * hc) {
+        const uint idst = tid & 3;
+        const uint isrc = tid >> 2;
+        comb_s[tid] = data_c[c_offset + idst * nbc0 + isrc * nbc1 + it * nbc2];
+    }
+#endif
+    barrier();
+
+    // After the barrier, so every invocation reaches it.
+#ifdef HC_POST_QUAD
+    // One invocation covers four consecutive i0 of the same (idst, it) slice: the three stride multiplies are shared
+    // and x, the residuals and dst become float4 accesses.
+    const uint i0 = gl_WorkGroupID.x * BLOCK_SIZE * 4u + tid * 4u;
+    if (i0 >= n_embd) {
+        return;
+    }
+    const uint xb = x_offset + i0 * nbx0 + it * nbx1;
+    // Partial group: read only the elements that exist, so the loads do not leave the row either.
+    const vec4 xv = (i0 + 4u <= n_embd)
+        ? vec4(data_x[xb + 0u], data_x[xb + 1u], data_x[xb + 2u], data_x[xb + 3u])
+        : vec4(data_x[xb + 0u],
+               i0 + 1u < n_embd ? data_x[xb + 1u] : 0.0f,
+               i0 + 2u < n_embd ? data_x[xb + 2u] : 0.0f,
+               i0 + 3u < n_embd ? data_x[xb + 3u] : 0.0f);
+    const uint rb = r_offset + i0 * nbr0 + it * nbr2;
+    vec4 r[hc];
+    [[unroll]]
+    for (uint isrc = 0; isrc < hc; ++isrc) {
+        const uint rs = rb + isrc * nbr1;
+        r[isrc] = (i0 + 4u <= n_embd)
+            ? vec4(data_r[rs + 0u], data_r[rs + 1u], data_r[rs + 2u], data_r[rs + 3u])
+            : vec4(data_r[rs + 0u],
+                   i0 + 1u < n_embd ? data_r[rs + 1u] : 0.0f,
+                   i0 + 2u < n_embd ? data_r[rs + 2u] : 0.0f,
+                   i0 + 3u < n_embd ? data_r[rs + 3u] : 0.0f);
+    }
+    [[unroll]]
+    for (uint idst = 0; idst < hc; ++idst) {
+        vec4 result = xv * post_s[idst];
+#if defined(HC_POST_COMB)
+        [[unroll]]
+        for (uint isrc = 0; isrc < hc; ++isrc) {
+            result = fma(r[isrc], vec4(comb_s[idst + hc * isrc]), result);
+        }
+#else
+        result += r[idst];
+#endif
+        const uint db = d_offset + i0 * nbd0 + idst * nbd1 + it * nbd2;
+        if (i0 + 4u <= n_embd) {
+            data_d[db + 0u] = result.x;
+            data_d[db + 1u] = result.y;
+            data_d[db + 2u] = result.z;
+            data_d[db + 3u] = result.w;
+        } else {
+            for (uint k = 0u; k < n_embd - i0; ++k) {
+                data_d[db + k] = result[k];
+            }
+        }
+    }
+#else
+    const uint i0 = gl_WorkGroupID.x * BLOCK_SIZE + tid;
+    if (i0 >= n_embd) {
+        return;
+    }
+
+    const float xv = data_x[x_offset + i0 * nbx0 + it * nbx1];
+
+    const uint rb = r_offset + i0 * nbr0 + it * nbr2;
+
+    float r[hc];
+    [[unroll]]
+    for (uint isrc = 0; isrc < hc; ++isrc) {
+        r[isrc] = data_r[rb + isrc * nbr1];
+    }
+
+    [[unroll]]
+    for (uint idst = 0; idst < hc; ++idst) {
+        float result = xv * post_s[idst];
+#if defined(HC_POST_COMB)
+        [[unroll]]
+        for (uint isrc = 0; isrc < hc; ++isrc) {
+            result = fma(r[isrc], comb_s[idst + hc * isrc], result);
+        }
+#else
+        result += r[idst];
+#endif
+        data_d[d_offset + i0 * nbd0 + idst * nbd1 + it * nbd2] = result;
+    }
+#endif
+}

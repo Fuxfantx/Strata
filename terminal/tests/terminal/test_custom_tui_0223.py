@@ -1,8 +1,7 @@
-"""Custom builds in the Terminal (0.2.23): the person's own compatible fine-tunes and quantizations (local .strata or .gguf files) are listed
+"""Custom builds in the Terminal (0.2.23): the person's own compatible fine-tunes and quantizations (local .gguf files) are listed
 next to the official builds of the same base model, run under their own run config, and removed without touching the model files.
 
-Covers Qwen3.8-Flash-Next (.gguf), Qwen3.6-35B-A3B (.gguf), HY-4 Flash (.strata) and Inkling-2-Mini (.strata and .gguf). The files here are tiny
-synthetic ones; no engine runs and nothing is downloaded.
+Covers Qwen3.8-Flash-Next and its Unsloth quantization (.gguf). The files here are tiny synthetic ones; no engine runs and nothing is downloaded.
 """
 
 from __future__ import annotations
@@ -24,10 +23,7 @@ GB = 1_000_000_000
 # one entry per family: the base build the custom file is run as, the official run config id, the engine and the kind of file
 FAMILIES = (
     dict(key="qwen", title="Qwen3.8-Flash-Next", base="IQ3_S", official="iq3_s", exe="component:strata-engine", arch=None, ext=".gguf", size=40 * GB),
-    dict(key="qwen36", title="Qwen3.6-35B-A3B", base="UD-Q4_K_XL", official="qwen36-ud-q4_k_xl", exe="component:strata-engine", arch="qwen35moe", ext=".gguf", size=20 * GB),
-    dict(key="hy4-flash", title="Hy4-Flash", base="SQ-64", official="hy4-flash-sq-64", exe="component:strata-hy4", arch="hy4flash", ext=".strata", size=120 * GB),
-    dict(key="inkling-2-mini", title="Inkling-2-Mini", base="SQ-20", official="inkling-2-mini-sq-20", exe="component:strata-inkling", arch="inkling2_loop", ext=".strata", size=17 * GB),
-    dict(key="inkling-2-mini", title="Inkling-2-Mini", base="UD-Q4_K_XL", official="inkling-2-mini-ud-q4_k_xl", exe="component:strata-inkling", arch="inkling2_loop", ext=".gguf", size=16 * GB),
+    dict(key="unsloth", title="Qwen3.8-Flash-Next (Unsloth)", base="UD-IQ1_M", official="unsloth-ud-iq1_m", exe="component:strata-engine", arch=None, ext=".gguf", size=68 * GB),
 )
 LABEL = "My Merge v2"
 
@@ -138,7 +134,7 @@ class CustomRowsTests(unittest.TestCase):
                     self.assertAlmostEqual(mine.download_gb, round(spec["size"] * factor / 1e9, 1))
                     got[factor] = mine.fit_gb
                 self.assertGreaterEqual(got[1.5], got[0.5])
-                if spec["key"] in ("qwen", "qwen36"):                                         # the scaled estimate: strictly more for more bytes
+                if spec["key"] in ("qwen", "unsloth"):                                         # the scaled estimate: strictly more for more bytes
                     self.assertGreater(got[1.5], got[0.5])
 
     def test_a_config_that_names_a_base_model_that_is_not_listed_is_skipped_not_an_error(self):
@@ -227,7 +223,7 @@ class CustomImportFlowTests(unittest.TestCase):
     def plan_for(self, spec: dict, weights: Path) -> dict:
         return {"source": str(weights), "model_dir": str(weights.parent), "scope": "local_gguf_candidate", "files": [], "file_count": 1,
                 "total_bytes": spec["size"], "issues": [], "plain_issues": [], "messages": [], "missing_shards": [], "folder_holds": [],
-                "file_kind": "strata" if spec["ext"] == ".strata" else "gguf", "file_set_status": "plausible",
+                "file_kind": "gguf", "file_set_status": "plausible",
                 "candidate_selection": {"family": spec["key"], "model": spec["base"], "basis": "same_layout_other_build", "custom": True,
                                         "suggested_label": weights.stem, "family_title": spec["title"], "base_family": spec["key"], "base_model": spec["base"]}}
 
@@ -255,7 +251,7 @@ class CustomImportFlowTests(unittest.TestCase):
                 self.assertIn("--model-path", line)
 
     def test_the_name_the_person_typed_wins_over_the_suggestion(self):
-        spec = FAMILIES[3]
+        spec = FAMILIES[1]
         lay = Layout(self.home, spec, both=False)
         with mock.patch("strata_control.models.plan_import", return_value=self.plan_for(spec, lay.weights)):
             s = S.LaunchSettings(model_path=str(lay.weights), custom_label=custom.clean_label(LABEL))
@@ -291,7 +287,7 @@ class CustomImportFlowTests(unittest.TestCase):
                 self.assertEqual(r.installed_state()[0], lay.custom)                              # and the launch reads the custom run config, not the official one
 
     def test_two_files_with_the_same_name_do_not_share_a_run_config(self):
-        spec = FAMILIES[3]
+        spec = FAMILIES[1]
         lay = Layout(self.home, spec)                                                               # one custom build called LABEL already exists
         other = lay.files / "other" / f"my-merge{spec['ext']}"
         other.parent.mkdir()
@@ -317,17 +313,17 @@ class CustomImportFlowTests(unittest.TestCase):
         self.assertEqual(custom.custom_alias(s), custom_models.model_alias(spec["key"], "Split Merge"))
         self.assertTrue(keys["custom"])
 
-    def test_the_unsupported_words_name_all_four_families_and_keep_the_custom_api_guidance(self):
-        for name in ("Qwen3.8-Flash-Next", "Qwen3.6-35B-A3B", "HY-4 Flash", "Inkling-2-Mini", "Custom model API", "llama-server"):
+    def test_the_unsupported_words_name_the_custom_families_and_keep_the_custom_api_guidance(self):
+        for name in ("Qwen3.8-Flash-Next", "Qwen3.6-35B-A3B", "Ornith-1.5-35B-A3B", "Custom model API", "llama-server"):
             self.assertIn(name, custom.UNSUPPORTED_WORDS)
 
     def test_the_cli_says_what_a_custom_plan_is(self):
         from strata_cli import cli
-        plan = self.plan_for(FAMILIES[2], Path("/x/my-merge.strata"))
+        plan = self.plan_for(FAMILIES[1], Path("/x/my-merge.gguf"))
         plan["adoption_status"] = "requires_checks"
         text = cli._import_words(plan)
-        self.assertIn(".strata file(s)", text)
-        self.assertIn("your own build of Hy4-Flash", text)
+        self.assertIn("GGUF file(s)", text)
+        self.assertIn("your own build of Qwen3.8-Flash-Next (Unsloth)", text)
         self.assertIn("never copied", text)
 
 
@@ -348,7 +344,7 @@ class CustomModelScreenTests(Base):
                 self.run_app(case, ctx=make_ctx(HW_24, S.LaunchSettings(family=spec["key"], model=spec["base"], custom_id=lay.tag, model_path=str(lay.weights))))
 
     def test_choosing_the_custom_row_selects_its_run_config_and_choosing_the_official_row_goes_back(self):
-        spec = FAMILIES[3]
+        spec = FAMILIES[1]
         lay = Layout(self.home, spec)
 
         async def choose(app, pilot, ctx, key):
@@ -372,7 +368,7 @@ class CustomModelScreenTests(Base):
         self.run_app(official_row, ctx=make_ctx(HW_24))
 
     def test_the_own_files_screen_asks_for_a_name_prefilled_with_the_suggestion(self):
-        spec = FAMILIES[2]
+        spec = FAMILIES[1]
         lay = Layout(self.home, spec, both=False)
         plan = CustomImportFlowTests.plan_for(None, spec, lay.weights)
 
@@ -387,10 +383,10 @@ class CustomModelScreenTests(Base):
             self.assertFalse(box.disabled)
             self.assertEqual(box.value, lay.weights.stem)                                            # the suggestion, editable
             self.assertIn("your own build", flat(app))
-            screen.finish_custom("My HY4 build")
+            screen.finish_custom("My Qwen build")
             s = ctx.settings
-            self.assertEqual((s.custom_label, s.family, s.model), ("My HY4 build", spec["key"], spec["base"]))
-            self.assertEqual(s.custom_id, custom_models.run_tag(spec["key"], "My HY4 build"))
+            self.assertEqual((s.custom_label, s.family, s.model), ("My Qwen build", spec["key"], spec["base"]))
+            self.assertEqual(s.custom_id, custom_models.run_tag(spec["key"], "My Qwen build"))
             self.assertEqual(s.model_path, str(lay.weights))
         self.run_app(case, ctx=make_ctx(HW_24))
 
@@ -429,7 +425,7 @@ class RemoveKeepsTheWeightsTests(unittest.TestCase):
         self.assertTrue(lay.official_weights.exists())
 
     def test_remove_reference_only_takes_files_beside_the_run_config(self):
-        lay = Layout(self.home, FAMILIES[3])
+        lay = Layout(self.home, FAMILIES[1])
         victim = lay.files / "strata-keepme.log"                     # a file with a run config's look elsewhere is never taken
         victim.write_text("x", encoding="utf-8")
         removed = custom.remove_reference(lay.custom)
@@ -438,12 +434,12 @@ class RemoveKeepsTheWeightsTests(unittest.TestCase):
         self.assertTrue(lay.weights.exists())
 
     def test_models_list_shows_the_custom_marker_the_name_and_the_size(self):
-        lay = Layout(self.home, FAMILIES[3])
+        lay = Layout(self.home, FAMILIES[1])
         code, out, err = run_cli(["models", "list", "--install-dir", str(lay.install)])
         self.assertEqual(code, 0, err)
         self.assertIn(lay.tag, out)
         self.assertIn("[Custom]", out)
-        self.assertIn("17 GB", out)
+        self.assertIn("68 GB", out)
         self.assertIn(LABEL, out)
 
 

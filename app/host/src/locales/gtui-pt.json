@@ -6,7 +6,7 @@
  "cm01": "Usar ficheiros de modelo locais (.strata ou .gguf)…",
  "cm02": "Já tem um modelo compatível neste computador, como um ajuste fino ou uma quantização compatível? Escolha a pasta que contém os seus ficheiros, ou um dos ficheiros .strata ou .gguf. O Strata verifica-os, prepara o modelo e carrega-o. Nada é copiado nem transferido, e os seus ficheiros nunca são alterados.",
  "cm03": "Pasta com os ficheiros do modelo, ou um ficheiro .strata ou .gguf",
- "cm04": "O Strata executa o Qwen3.8-Flash-Next, o Qwen3.6-35B-A3B, o HY-4 Flash e o Inkling-2-Mini, e os ajustes finos e quantizações compatíveis deles. Transfira um em Modelos, ou escolha os seus ficheiros .strata ou .gguf.",
+ "cm04": "O Strata executa o Qwen3.8-Flash-Next, o Qwen3.6-35B-A3B e o Ornith-1.5-35B-A3B, e os ajustes finos e quantizações compatíveis deles. Transfira um em Modelos, ou escolha os seus ficheiros .strata ou .gguf.",
  "cm05": "Confirme que a pasta contém ficheiros .strata ou .gguf completos e tente de novo. O ficheiro indicado em Detalhes diz o que está errado.",
  "cm06": "Versão personalizada",
  "cm07": "Versão mais próxima:",

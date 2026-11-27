@@ -17,7 +17,7 @@ Opt-in, in the run config (nothing changes without it):
                                when the experts fit there); false: each engine keeps its own copy; a path: that file
     prefill_args / decode_args extra engine arguments for one role (a bigger expert cache for the decode engine, say)
 
-What must match between the two engines is what the session file checks (docs/SPLIT_SERVE.md): the model files, the engine
+What must match between the two engines is what the session file checks: the model files, the engine
 version, the backend, --kv, --max-context, --kv-resident, --mtp-window, the rope settings and the arithmetic switches.  They
 start from one config, so they do.  Every failure on the way (a prefill engine that died, a refused file) is not an error
 for the client: the decode engine reads the prompt itself, as it would without the option.

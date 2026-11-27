@@ -87,9 +87,7 @@ def valid(shape) -> bool:
 
 
 def component_id(shape: str) -> str:
-    """``q4_lite`` -> ``strata-q4-lite``; ``inkling2`` -> ``strata-inkling``."""
-    if shape == INKLING_SHAPE:
-        return "strata-inkling"
+    """``q4_lite`` -> ``strata-q4-lite``."""
     return "strata-" + str(shape).replace("_", "-")
 
 
@@ -97,8 +95,6 @@ def shape_of_component(component: str) -> str | None:
     """``strata-q4-lite`` -> ``q4_lite``; None for anything that is not a shape's component (``strata-engine`` included)."""
     if not isinstance(component, str) or not component.startswith("strata-"):
         return None
-    if component == "strata-inkling":
-        return INKLING_SHAPE
     shape = component[len("strata-"):].replace("-", "_")
     return shape if valid(shape) and component_id(shape) == component else None
 
@@ -121,21 +117,8 @@ def reference(shape: str) -> str:
     return ec.REFERENCE_PREFIX + component_id(shape)
 
 
-#: The engines of Tencent Hy4-Flash and Thinking Machines Inkling-2-Mini are "shapes" in this module's sense (each is its own component next to the Strata engine, fetched
-#: through the signed feed, named by the run config's exe "component:strata-hy4" / "component:strata-inkling") but not a compile of the Qwen Strata engine: each has its own
-#: program (`strata-hy4`, `strata-inkling`) and no Qwen geometry, so it identifies itself with `--version` / `--info`.
-HY4_SHAPE = "hy4"
-INKLING_SHAPE = "inkling2"
-CUSTOM_SHAPES = frozenset({HY4_SHAPE, INKLING_SHAPE})
-
-
 def exe_name(shape: str | None = None, *, target: str | None = None) -> str:
-    if shape == HY4_SHAPE:
-        base = "strata-hy4"
-    elif shape == INKLING_SHAPE:
-        base = "strata-inkling"
-    else:
-        base = "strata"
+    base = "strata"
     win = target.startswith("windows") if target else (os.name == "nt")
     return base + (".exe" if win else "")
 
@@ -234,15 +217,7 @@ def _test_start(exe: Path, timeout: float = 120.0, shape: str | None = None) -> 
     if done.returncode != 0 or not first.startswith("strata"):
         tail = ((done.stderr or "").strip().splitlines() or [first or f"exit {done.returncode}"])[-1]
         return False, tail[:160]
-    if shape == HY4_SHAPE:
-        # Hy4-Flash's engine has no geometry: `strata-hy4 --version` named it ("strata-hy4 <version>") and that is the whole check
-        if not first.startswith("strata-hy4"):
-            return False, NO_SHAPE_ANSWER
-    elif shape == INKLING_SHAPE:
-        # Inkling-2-Mini's engine has no Qwen geometry: `strata-inkling --version` names it ("strata-inkling <version>")
-        if not first.startswith("strata-inkling"):
-            return False, NO_SHAPE_ANSWER
-    elif shape:
+    if shape:
         ok, why = check_geometry(exe, shape, env, timeout)
         if not ok:
             return False, why

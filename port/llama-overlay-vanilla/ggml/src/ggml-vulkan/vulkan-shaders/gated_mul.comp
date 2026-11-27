@@ -1,0 +1,95 @@
+// gated_mul.comp - out[e,t] = x[e,t] * sigmoid(gate[e or 0, t])
+//
+// One dispatch for what the graph otherwise emits as UNARY(sigmoid) followed by MUL, because the graph rarely keeps
+// them adjacent.  The gate is broadcast exactly like ggml_mul's second operand: one value per row (gne0 == 1) or per
+// element (gne0 == ne0), indexed by the row index t.
+//
+// Both dimensions are compile-time:
+//   GATE_BROADCAST (define)  the gate has one value per row; otherwise it has one per element, and then the gate
+//                            index is the flat index itself, so no stride arithmetic is left;
+//   GATED_MUL_QUAD (define)  four elements per invocation on a row-major grid, float4 accesses, no division.  The
+//                            host picks it for long rows; short rows keep one element per invocation, where the
+//                            parallelism matters more than the wider access.
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#if defined(PARAM_BLOCK_ENABLED)
+#define PARAM_BLOCK_BINDING 12
+layout (binding = PARAM_BLOCK_BINDING, std430) readonly buffer parameter
+#else
+layout(push_constant) uniform parameter
+#endif
+{
+    uint n;        // elements of x, for the tail guard
+    uint ne0;      // x->ne[0]
+    uint ne1;      // x->ne[1]
+    uint gne0;     // gate->ne[0], only read when GATE_BROADCAST is 0 and gne0 != ne0
+    uint ne0mp;    // magic multiplier for / ne0
+    uint ne0L;     // shift for / ne0
+} p;
+
+layout(binding = 0, std430) readonly  buffer X { float data_x[]; };
+layout(binding = 1, std430) readonly  buffer G { float data_g[]; };
+layout(binding = 2, std430) writeonly buffer D { float data_d[]; };
+
+#ifndef GATE_BROADCAST
+#define GATE_BROADCAST 0
+#endif
+
+float gate_at(uint g) {
+    return 1.0f / (1.0f + exp(-data_g[g]));
+}
+
+#ifdef GATED_MUL_QUAD
+void main() {
+    const uint t = gl_GlobalInvocationID.y + gl_GlobalInvocationID.z * p.ne1;
+    const uint e = gl_GlobalInvocationID.x * 4u;
+    const uint base = t * p.ne0 + e;
+    if (e >= p.ne0 || base >= p.n) {
+        return;
+    }
+    if (e + 4u <= p.ne0) {
+#if GATE_BROADCAST
+        const vec4 gv = vec4(gate_at(t));
+#else
+        const uint gb = base;
+        const vec4 gv = vec4(gate_at(gb + 0u), gate_at(gb + 1u), gate_at(gb + 2u), gate_at(gb + 3u));
+#endif
+        data_d[base + 0u] = data_x[base + 0u] * gv.x;
+        data_d[base + 1u] = data_x[base + 1u] * gv.y;
+        data_d[base + 2u] = data_x[base + 2u] * gv.z;
+        data_d[base + 3u] = data_x[base + 3u] * gv.w;
+        return;
+    }
+    const uint last = min(4u, p.ne0 - e);
+    for (uint k = 0u; k < last; ++k) {
+#if GATE_BROADCAST
+        const uint g = t;
+#else
+        const uint g = base + k;
+#endif
+        data_d[base + k] = data_x[base + k] * gate_at(g);
+    }
+}
+#else
+void main() {
+    // Fold the flat grid into two dimensions: a long tensor (millions of elements at a large prefill) otherwise needs
+    // more workgroups than the device allows.  gl_NumWorkGroups is the x count the host actually used.
+    const uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * gl_WorkGroupSize.x);
+    if (i >= p.n) {
+        return;
+    }
+#if GATE_BROADCAST
+    // i / ne0 by magic multiply (the host fills ne0mp and ne0L with init_fastdiv_values), and the gate index is the
+    // row.  i < ne0*ne1, so (i / ne0) % ne1 is i / ne0.
+    uint msbs, lsbs;
+    umulExtended(i, p.ne0mp, msbs, lsbs);
+    const uint t = (msbs + i) >> p.ne0L;
+    data_d[i] = data_x[i] * gate_at(t);
+#else
+    // One gate value per element: the gate index is the flat index, so no stride arithmetic at all.
+    data_d[i] = data_x[i] * gate_at(i);
+#endif
+}
+#endif

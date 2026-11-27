@@ -1,7 +1,6 @@
 # Strata packaging: targets, recipes and locks
 
-This page is for developers who build the desktop app, the Terminal archive and the engine packages. To install Strata, use
-[docs/INSTALL.md](../../docs/INSTALL.md). It describes the current release (app and Terminal 0.2.23, Control 0.1.70, engines 0.1.70).
+This page is for developers who build the desktop app, the Terminal archive and the engine packages. To build and install this branch, see [../port/README.md](../port/README.md) and [../BUILD-WOA.md](../BUILD-WOA.md).
 How packages are signed and published is in [UPDATES.md](UPDATES.md), and the package format is in [ENGINE-COMPONENT.md](ENGINE-COMPONENT.md).
 
 Release assets show what was published; the platform guides and retained reports show what was tested. A published package does not
@@ -24,14 +23,8 @@ Each row is an OS, CPU ABI and backend. A row is `qualified` only after the acce
 
 | Target | App artifact | Engine package recipe | Status |
 | --- | --- | --- | --- |
-| `macos-arm64-metal` | `.app` and `.dmg` (Tauri) | Metal `strata`, bundled with `strata-vision` (`packaging/build_vision_mac.sh`) | Built. Self-test passes from the mounted DMG. Inference measurements are in [MAC.md](../../docs/MAC.md). Signing: `packaging/mac/sign-and-notarize.sh` ([mac/README.md](mac/README.md)). |
 | `darwin-arm64` Terminal | self-contained `.tar.gz` | any | Built and verified. Runs from a moved directory with no system Python. |
 | `windows-x86_64-cuda` | NSIS `.exe` (Tauri) | `cuda13` and `cuda12` | Built and tested on a Windows PC with an NVIDIA card: silent install with a System32-only PATH, a real model, an agent chat. |
-| `windows-x86_64-hip` | NSIS `.exe` (Tauri) | `tools/hip/build_windows.bat` | Published. Strix Halo inference is recorded in [STRIX_HALO.md](../../docs/STRIX_HALO.md). This does not qualify every discrete Radeon card ([AMD_HIP.md](../../docs/AMD_HIP.md)). |
-| `linux-x86_64-cuda` | AppImage (Tauri) | `packaging/build_cuda_linux.sh`, built in a glibc 2.35 chroot | `cuda13` built and tested on RTX 3060 and RTX A4000 (app in the browser, a real model, a picture). `cuda12` built. |
-| `linux-x86_64-hip` | AppImage (Tauri) | `packaging/build_hip_linux.sh` | `rx9070` (gfx1200 / gfx1201) built and tested on a Radeon AI PRO R9700. `rx7900` (gfx1100 / 1101 / 1102) built, not run on an RX 7000 card. `rx6000` (gfx1030 / 1031) built, not tested on a real RX 6000 card. |
-| `linux-aarch64-cuda` | none (no AppImage for arm64) | `packaging/build_cuda_linux_aarch64.sh`, built on the DGX Spark (`cuda13`, `sm_121`) | The engine package and the Terminal archive built and tested on one DGX Spark ([DGX_SPARK_LINUX.md](../../docs/DGX_SPARK_LINUX.md)). Not tried on any other arm64 machine. |
-| `linux-x86_64-sycl` | none | `packaging/build_sycl_linux.sh` (one JIT package for Alchemist and Battlemage) | Engine package built and tested on an Arc A750. Battlemage is supported and untested by us. |
 | `windows-x86_64-sycl` | none | none | Gated. No native Windows SYCL path exists upstream. |
 | `macos-x86_64-*` | none | none | Unsupported. The macOS engine is Apple Silicon only. |
 
@@ -84,7 +77,6 @@ socket elsewhere; a Job Object or process group; leases), and a second client su
 
 The app starts each engine with `runtime start --die-with-pid <host>`, so the engine ends with the host. The host ends with the shell
 (a kill-on-close Job Object on Windows; the host watches its parent everywhere). The app is a single instance: a second launch focuses
-the open window. One app can run several engines (profiles `app-1`, `app-2`, ...). Every close path is in [docs/CLOSING.md](../../docs/CLOSING.md).
 
 **The engine.** The Windows and Linux installers carry no engine. On the first start the app shows the engine for the card with its size
 and one Download button (with progress and resume), or installs an engine file the person already has ("I already have the file").
@@ -119,8 +111,6 @@ The Terminal bundles a private Python and its dependencies for `windows-x86_64`,
 - The interpreter is python-build-standalone CPython 3.12.15, digest-checked at build time.
 - Packages come from `packaging/locks/runtime-<target>-cp312.txt` and are installed with
   `pip install --require-hashes --no-deps --only-binary=:all:` at build time only. `lock_wheels.py` makes the lock; review its diff when a pin changes.
-- Wrappers: `bin/strata.cmd` and `bin/strata-direct.ps1` on Windows (never a `strata.ps1`: PowerShell would run it before `strata.cmd`, and the default execution policy refuses it), `bin/strata` on POSIX. `START-HERE.bat`, `SETUP.bat`, `UPDATE.bat`, `setup.sh`
-  and `update.sh` use a `python/` folder beside them when there is one.
 - `smoke_terminal.py <archive>` extracts an archive into a clean environment (a path with a space, a PATH with no Python) and runs
   `--version`, `doctor`, `profile list`, `install` and `serve --engine mock`.
 - Check each archive's `BUNDLE.json` and lock digests. An old archive is not upgraded when the source lock changes.
@@ -130,7 +120,7 @@ The Terminal bundles a private Python and its dependencies for `windows-x86_64`,
 1. The app launches and the window serves the supplied UI from the host's origin.
 2. The owner transport works: one owner per installation, a second client attaches, a stale owner can be recovered, and no client can stop a process it does not own.
 3. Real inference on a supported pack, with the engine build hash and the model hashes recorded.
-4. A qualification run on that platform, with raw evidence kept. The Mac-first run in October 2026 is the earlier example: [history/docs/work/QUALIFICATION-KIT.md](../../docs/history/docs/work/QUALIFICATION-KIT.md).
+4. A qualification run on that platform, with raw evidence kept. The Mac-first run in October 2026 is the earlier example (its evidence archive is not in this repository).
 
 ## Release checks and gaps
 
@@ -149,5 +139,5 @@ The Terminal bundles a private Python and its dependencies for `windows-x86_64`,
 - **Repository size:** `app/desktop/src-tauri/target` and the Node sidecar were briefly committed, which left about 324 MB in the git object
   store. They are untracked and ignored now. History was not rewritten.
 - **Mac packaging tests:** the first DMG self-test (8/8) and the engine's 17 kernel-parity suites ran on an Apple M4 GPU in a 16 GiB Mac, with service stand-ins for signing.
-  Later inference measurements on larger Macs are in [MAC.md](../../docs/MAC.md).
+  Later inference measurements on larger Macs are not in this repository.
 - **Intel Arc:** official since 0.1.40.2. The 2026-10 B70 tests used the source build, not the engine package. `sycl/setup_intel.py` (Docker) remains the source-build route.

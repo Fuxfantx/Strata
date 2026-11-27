@@ -10,7 +10,7 @@ What goes in
 ------------
 * a pinned **standalone CPython 3.12.15** (python-build-standalone 20261009, `install_only`), downloaded at BUILD
   time and SHA-256-verified against the pin below (the digests are the ones in that release's SHA256SUMS, the Mac one
-  is also what `setup.sh` pins), so the terminal and the installer cannot drift apart;
+  is also what the Windows installer pins), so the terminal and the installer cannot drift apart;
 * the runtime wheels from the target's lock, `packaging/locks/runtime-<target>-cp312.txt` (made by
   `packaging/lock_wheels.py`), installed into that interpreter with
   `pip install --require-hashes --no-deps --only-binary=:all:` at BUILD time only: every package, direct or
@@ -66,7 +66,7 @@ PYTHON_VERSION = "3.12.15"
 PBS_BASE = f"https://github.com/astral-sh/python-build-standalone/releases/download/{PBS_RELEASE}/"
 
 #: The standalone CPython pins, one per target, from the release's SHA256SUMS. `darwin-arm64` is also what
-#: `setup.sh` pins: a terminal built from one and an installer built from the other are the same interpreter.
+#: `` pins: a terminal built from one and an installer built from the other are the same interpreter.
 PYTHON_PINS = {
     "windows-x86_64": {
         "file": f"cpython-{PYTHON_VERSION}+{PBS_RELEASE}-x86_64-pc-windows-msvc-install_only.tar.gz",
@@ -103,8 +103,6 @@ PAYLOAD = (
     "serve",
     "requirements.txt",
     "requirements-monitor.txt",
-    "docs/MANAGEMENT_PROTOCOL.md",
-    "docs/TERMINAL_LAUNCH.md",         # the README below points at it (`strata launch`); it used to be missing from the archive
     "data/gguf_fingerprints.json",     # `strata models import --plan` names a known file set from this table
     "bench/prompts/standard-v1",       # `strata bench run` (the standard benchmark) sends these frozen requests; hashed byte for byte
 )
@@ -129,9 +127,9 @@ INSTALLER_FILES = ("setup.py", "ref/load.py")   # ref/load.py: strata_pack.py (t
 INSTALLER_TOOLS = ("strata_mcp", "iq_pack", "strata_pack", "pack_index", "mtp_fetch", "mtp_pack", "mtp_rt", "draft_vocab",
                    "strata_tokenizer", "gguf_reader", "calibrate")
 #: tools run BY PATH (`python tools/.../x.py`) by setup.py, strata_cli or strata_control: no import names them, so setup_tool_imports() cannot find
-#: them.  setup.py's by-path tools (nvfp4_local_pack, strata_bench, strata_inspect) were missing from the bundle once.
+#: them.  setup.py's by-path tools (strata_bench, strata_inspect) were missing from the bundle once.
 #: tests/terminal/test_bundle_tools_paths.py reads the by-path references out of the source and fails when one is missing from the bundle.
-INSTALLER_SCRIPTS = ("nvfp4_local_pack", "strata_bench", "strata_inspect")
+INSTALLER_SCRIPTS = ("strata_bench", "strata_inspect")
 INSTALLER_DATA = "data"           # draft vocabularies, expert profiles: 2 MB
 #: gguf-py and llama.cpp's HF converter at the llama.cpp pin (third_party/strata-gguf-py, 1.8 MB, MIT): the preparation tools import them, so
 #: no llama.cpp download is needed to prepare a model (before 0.2.15 the installed Terminal fetched the 170 MB zip for this)
@@ -645,7 +643,7 @@ downloads the one you choose (the installer files setup.py and tools/ are in thi
 
 Useful commands
 ---------------
-    strata launch                     choose a model, tune it, serve it and watch it (guided screens; docs/TERMINAL_LAUNCH.md)
+    strata launch                     choose a model, tune it, serve it and watch it (guided screens)
     strata connect opencode           the setup for a coding app on the running server (also codex, claude-code, omp, pi, hermes, openclaw)
     strata --version                  the version and the interpreter it runs on
     strata doctor                     read-only component inventory

@@ -181,7 +181,7 @@ def places(*, here: Path | None = None, explicit: str | os.PathLike | None = Non
         return [Place(p, "explicit", len(config_files(p)))]
     cands: list[tuple[Path, str]] = []
     data_root = environ.get("STRATA_DATA_DIR")
-    if data_root:                                    # the installer's own folder (install.sh / install.ps1): an install kept inside it comes first
+    if data_root:                                    # the installer's own folder (install.ps1): an install kept inside it comes first
         cands.append((Path(data_root).expanduser() / "install", "datadir"))
     if here is not None:
         cands.append((Path(here), "here"))
@@ -369,11 +369,6 @@ def footprint(cfg: dict, config: Path | None = None) -> Footprint:
         v = _flag_value(args, flag)
         if v and v.lower().endswith(".gguf") and Path(v) not in fp.weights and flag != "--ple-gguf":
             fp.weights.append(Path(v))
-    if not fp.weights and str(cfg.get("arch") or "").lower() in ("hy4flash", "inkling2_loop"):
-        for flag in ("--native", "--engram"):
-            v = _flag_value(args, flag)
-            if v and v.lower().endswith(".strata") and Path(v) not in fp.weights:
-                fp.weights.append(Path(v))
     if not fp.weights:
         fp.weights = [Path(a) for a in args if a.lower().endswith(".gguf")][:1]
     pack = _flag_value(args, "--pack")

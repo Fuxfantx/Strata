@@ -66,7 +66,7 @@ class ReaderCheck(unittest.TestCase):
     def test_a_macos_package_without_a_reader_is_refused(self):
         with self.assertRaises(SystemExit) as cm:
             self.check("metal", "macos-arm64", ())
-        self.assertIn("build_vision_mac.sh", str(cm.exception))
+        self.assertIn("build_vision_windows.bat", str(cm.exception))
         self.assertIn("pictures are off", self.check("metal", "macos-arm64", (), allow_none=True)[0])
 
     def test_a_macos_package_with_a_reader_passes(self):

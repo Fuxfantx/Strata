@@ -45,7 +45,7 @@ const GFX12=/^gfx120[01]$/i, RADEON_9000=/\b(?:RX\s*9\d{3}|AI\s*PRO\s*R97\d{2}|R
 /**
  * Which switches make sense for this model on this PC: only those are shown. `backend` is the engine's (cuda, hip, sycl, metal, cpu). `arch` is the "arch"
  * of the model's run config: setup writes it only for the families with an engine path of their own (Qwen3.6-35B-A3B "qwen35moe");
- * the Qwen3.8-Flash-Next files (the original, Swift, Coder, Unsloth, Gyro, NVFP4) have none. KVA was measured on the Flash-Next shape (48 layers, 512
+ * the Qwen3.8-Flash-Next files (the original, Swift, Coder, Unsloth, Gyro) have none. KVA was measured on the Flash-Next shape (48 layers, 512
  * experts) and the engine declines it on any other, so "Faster long prompts" is shown for a model without an "arch" only.
  */
 /** A discrete NVIDIA card of 13 GiB or less: the engine's rule for residency-biased routing (not an integrated chip, not a card that shares system memory). */
@@ -59,7 +59,6 @@ const smallNvidia=gpus=>(gpus??[]).some(g=>{
 const radeon9000=gpus=>(gpus??[]).some(g=>(!g.vendor||g.vendor==='amd')&&(GFX12.test(String(g.arch??''))||(!g.arch&&RADEON_9000.test(String(g.name??'')))));
 export function speedSwitchApplies(id,{deepseek=false,backend=null,gpus=[],arch=null,vision=false}={}){
  if(deepseek)return false;                                              // a DeepSeek settings file (no longer run): no switch
- if(arch==='hy4flash'||arch==='inkling2_loop')return false;              // Hy4-Flash & Inkling-2-Mini read none of these Qwen environment switches
  if(id==='faster_long_prompts')return !arch&&(backend==='cuda'||backend==='hip');
  if(id==='faster_12gb_nvidia')return !arch&&backend==='cuda'&&smallNvidia(gpus);   // the engine's routing needs the Flash-Next shape (512 experts, top-10) and a CUDA build
  if(id==='route_tail_skip')return backend==='cuda'||(backend==='hip'&&radeon9000(gpus));   // the engine reads STRATA_ROUTE_TAIL_SKIP on CUDA and gfx1200/gfx1201 only
@@ -79,7 +78,7 @@ export function setSpeedSwitch(env,id,on){
 export function speedSwitchRows(env,context){return SPEED_SWITCHES.filter(s=>speedSwitchApplies(s.id,context)).map(s=>({...s,on:speedSwitchIsOn(env,s.id)}));}
 /** Settings the app itself applies when it starts a model (they are not read from the engine's source, so the engine's text never says it supports them). */
 export const APP_OWNED_FIELDS=['mtp','batchMtp','drafting'];
-/** The families that have a Drafting choice and the model names the DFlash2 drafter was made for (strata_control/drafting.py SUPPORTED_FAMILIES, _SUPPORTED_NAME): Qwen3.8-Flash-Next, Gyro and Unsloth's quantizations of the same weights; not Swift, Coder or NVFP4. */
+/** The families that have a Drafting choice and the model names the DFlash2 drafter was made for (strata_control/drafting.py SUPPORTED_FAMILIES, _SUPPORTED_NAME): Qwen3.8-Flash-Next, Gyro and Unsloth's quantizations of the same weights; not Swift or Coder. */
 export const DRAFTING_FAMILIES=GENERATED_DRAFTING_FAMILIES;
 const DFLASH2_MODEL=new RegExp(DFLASH2_MODEL_PATTERN,'i');
 const DFLASH2_NAMED=new RegExp(DFLASH2_NAMED_PATTERN,'i');
@@ -119,7 +118,7 @@ export function validateNativeSettings(values){
   if(field.type==='number'&&(!Number.isFinite(value)||value<field.min||value>field.max||!Number.isInteger(value)))throw new Error(`${field.label}: choose a whole number from ${field.min} to ${field.max}.`);
   if(field.type==='boolean'&&typeof value!=='boolean')throw new Error(`${field.label}: choose on or off.`);
   if(field.type==='string'&&(typeof value!=='string'||value.length>256))throw new Error(`${field.label}: enter at most 256 characters.`);
-  if(field.type==='enum'&&!(key==='drafting'&&(value==='dfly2'||value==='dspark'))&&!field.choices.includes(value))throw new Error(`${field.label}: choose a supported option.`);
+  if(field.type==='enum'&&!field.choices.includes(value))throw new Error(`${field.label}: choose a supported option.`);
   if(field.type==='array'&&(!Array.isArray(value)||value.length>24||value.some(v=>typeof v!=='string'||!v.trim()||v.length>80)||new Set(value).size!==value.length))throw new Error('Choose distinct model aliases, up to 80 characters each.');
   if(key==='layer_split'&&value!=='auto'){const points=value.split(',').map(Number);if(!points.length||points.some((n,i)=>!Number.isInteger(n)||n<1||n>=48||(i>0&&n<=points[i-1])))throw new Error('Layer split points must increase from 1 to 47, for example 16,32.');}
   result[key]=value;

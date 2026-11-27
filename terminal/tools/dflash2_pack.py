@@ -11,7 +11,7 @@ dtypes: "q8_0" (ggml Q8_0 blocks, 34 bytes per 32 values, rows of the weight mat
 multi-column MMVQ reads), "f32" (norms, the two conv base kernels), "q4_0" (--q4_0: ggml Q4_0 blocks, 18 bytes per 32 values, the matrices only; the engine tiles them like Q8_0, see gemm4_kernel in
 src/kernels/cuda/dflash2.cu), "bf16" (the selector's two codebooks: only gathered rows are read; with --q4_0-selector they are "q4_0" rows in block order, not tiled).
 The matrices' quantization matches ggml's quantize_row_q8_0 (d = amax / 127, q = round(x / d), d stored as fp16); the research harness
-(tools/dflash2/q8test.py) measured no acceptance loss from it.
+(tools/dflash2/the drafter test) measured no acceptance loss from it.
 """
 import sys
 if sys.platform == "win32":

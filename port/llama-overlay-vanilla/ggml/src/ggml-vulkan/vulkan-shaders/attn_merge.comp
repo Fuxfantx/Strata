@@ -1,0 +1,64 @@
+#version 450
+
+// attn_merge folds context-parallel attention shards into the normalised result.
+//
+// Each shard reports its unnormalised output o_s = sum_j exp(s_j - m_s) v_j together with its row max m_s and its
+// denominator l_s.  With two shards and m = max(m0, m1):
+//
+//   e_s = exp(m_s - m),  O = (o0*e0 + o1*e1) / (l0*e0 + l1*e1)
+//
+// o is [head_dim, heads, tokens, seqs] and contiguous, so a row is head_dim floats and its scalars are indexed by the
+// same flat row number.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#if defined(PARAM_BLOCK_ENABLED)
+#define PARAM_BLOCK_BINDING 12
+layout (binding = PARAM_BLOCK_BINDING, std430) readonly buffer parameter
+#else
+layout (push_constant) uniform parameter
+#endif
+{
+    uint hd;      // head_dim, elements per row
+    uint n_row;   // heads * tokens * seqs
+} p;
+
+layout(binding = 0, std430) readonly  buffer O0 { float data_o0[]; };
+layout(binding = 1, std430) readonly  buffer M0 { float data_m0[]; };
+layout(binding = 2, std430) readonly  buffer L0 { float data_l0[]; };
+layout(binding = 3, std430) readonly  buffer O1 { float data_o1[]; };
+layout(binding = 4, std430) readonly  buffer M1 { float data_m1[]; };
+layout(binding = 5, std430) readonly  buffer L1 { float data_l1[]; };
+layout(binding = 6, std430) writeonly buffer D  { float data_d[];  };
+
+void main() {
+    const uint row = gl_GlobalInvocationID.y;
+    if (row >= p.n_row) {
+        return;
+    }
+
+    const float mx  = max(data_m0[row], data_m1[row]);
+    const float e0  = exp(data_m0[row] - mx);
+    const float e1  = exp(data_m1[row] - mx);
+    const float den = data_l0[row] * e0 + data_l1[row] * e1;
+    const float inv = den != 0.0 ? 1.0 / den : 0.0;
+
+    const uint base = row * p.hd + gl_GlobalInvocationID.x * 4u;
+    if (gl_GlobalInvocationID.x * 4u + 4u <= p.hd) {
+        const vec4 a0 = vec4(data_o0[base + 0u], data_o0[base + 1u], data_o0[base + 2u], data_o0[base + 3u]);
+        const vec4 a1 = vec4(data_o1[base + 0u], data_o1[base + 1u], data_o1[base + 2u], data_o1[base + 3u]);
+        const vec4 r  = (a0 * e0 + a1 * e1) * inv;
+        data_d[base + 0u] = r.x;
+        data_d[base + 1u] = r.y;
+        data_d[base + 2u] = r.z;
+        data_d[base + 3u] = r.w;
+        return;
+    }
+    // Tail: only the elements that exist, so a head_dim that is not a multiple of four stays in bounds.
+    const uint e = gl_GlobalInvocationID.x * 4u;
+    if (e < p.hd) {
+        for (uint k = 0u; k < p.hd - e; ++k) {
+            data_d[base + k] = (data_o0[base + k] * e0 + data_o1[base + k] * e1) * inv;
+        }
+    }
+}

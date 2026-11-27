@@ -1,5 +1,5 @@
 """#5240: DFlash2 on the Coder is an explicit opt-in. A DFlash2 chosen by name on the Coder starts DFlash2 with the stock pack (the Coder has no tuned pack) and no MTP
-layer; Auto (and no choice) keeps the MTP on the Coder; Swift and NVFP4 stay refused (the MTP, with the NOT_SUPPORTED line); setup fetches the stock pack only for the
+layer; Auto (and no choice) keeps the MTP on the Coder; Swift stays refused (the MTP, with the NOT_SUPPORTED line); setup fetches the stock pack only for the
 named choice. The app's copies (resolveDrafter) are checked against the same rule by app/host/tests/policy-generated.test.mjs."""
 
 from __future__ import annotations
@@ -36,13 +36,13 @@ class CoderNamed(unittest.TestCase):
         self.assertEqual(drafting.choice_of("auto", family="coder", backend="cuda"), "mtp")
         self.assertEqual(drafting.choice_of("auto", model_name=CODER, backend="cuda"), "mtp")
 
-    def test_swift_and_nvfp4_stay_refused(self):
-        for name in ("qwen3.8-flash-next-nvfp4-nvfp4", "swift-1.5-iq2_xs", "qwen3.8-flash-next-swift-iq2_xs"):
+    def test_swift_stays_refused(self):
+        for name in ("swift-1.5-iq2_xs", "qwen3.8-flash-next-swift-iq2_xs"):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
                 cfg, data, _mtp = self.run_config(name, tmp, "dflash2")
                 d = drafting.apply(cfg, data_dir=data, backend="cuda", archs=["sm_89"])
                 self.assertEqual((d.drafter, d.note), ("mtp", drafting.NOT_SUPPORTED))
-        for family in ("swift", "nvfp4", "qwen36"):
+        for family in ("swift", "qwen36"):
             self.assertEqual(drafting.choice_of("dflash2", family=family, backend="cuda"), "mtp", family)
 
     def test_the_named_rule(self):

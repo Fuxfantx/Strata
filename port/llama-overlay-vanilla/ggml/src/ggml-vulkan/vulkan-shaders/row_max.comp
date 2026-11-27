@@ -1,0 +1,52 @@
+#version 450
+
+// row_max reduces dimension 0: out[0, i1, i2, i3] = max over i0 of src[i0, i1, i2, i3].
+//
+// One workgroup per row.  Threads scan the row with a stride and the partial maxima meet in shared memory.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#if defined(PARAM_BLOCK_ENABLED)
+#define PARAM_BLOCK_BINDING 12
+layout (binding = PARAM_BLOCK_BINDING, std430) readonly buffer parameter
+#else
+layout (push_constant) uniform parameter
+#endif
+{
+    uint ne0;    // elements to reduce
+    uint n_row;  // number of rows
+    uint s0;     // element stride inside a row
+    uint s_row;  // element stride between rows
+} p;
+
+layout(binding = 0, std430) readonly  buffer A { float data_a[]; };
+layout(binding = 1, std430) writeonly buffer D { float data_d[]; };
+
+shared float partial[256];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x;
+    if (row >= p.n_row) {
+        return;
+    }
+
+    const uint base = row * p.s_row;
+    float m = -3.402823466e+38f;
+    for (uint i = tid; i < p.ne0; i += 256u) {
+        m = max(m, data_a[base + i * p.s0]);
+    }
+    partial[tid] = m;
+    barrier();
+
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            partial[tid] = max(partial[tid], partial[tid + s]);
+        }
+        barrier();
+    }
+
+    if (tid == 0u) {
+        data_d[row] = partial[0];
+    }
+}

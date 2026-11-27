@@ -97,33 +97,11 @@ test('the engine step keeps the install job\'s own parts (model parts, picture r
 
 test('the recommended four come first; the others are what the "More versions" list holds', () => {
   const v = (sourceFamily, model) => ({ sourceFamily, model, id: `${sourceFamily}-${model}` });
-  const all = [v('qwen', 'Q2_0'), v('gyro', 'Gyro-S'), v('swift', 'IQ2_XS'), v('qwen', 'IQ3_S'), v('unsloth', 'UD-Q4_K_XL'), v('nvfp4', 'NVFP4')];
+  const all = [v('qwen', 'Q2_0'), v('gyro', 'Gyro-S'), v('swift', 'IQ2_XS'), v('qwen', 'IQ3_S'), v('unsloth', 'UD-Q4_K_XL')];
   const rec = lib.recommendedVersions(all).map(x => x.v.model);
   assert.deepEqual(rec, ['Gyro-S', 'IQ2_XS', 'IQ3_S', 'UD-Q4_K_XL']);
-  assert.deepEqual(all.filter(x => !rec.includes(x.model)).map(x => x.model), ['Q2_0', 'NVFP4']);
+  assert.deepEqual(all.filter(x => !rec.includes(x.model)).map(x => x.model), ['Q2_0']);
   assert.deepEqual(lib.recommendedVersions([v('qwen36', 'UD-Q4_K_XL')]), [], 'Qwen3.6 has no recommended set: its versions are all shown');
-});
-
-test('the three NVFP4 versions have clear names and one line that tells them apart', () => {
-  lib.setTranslationLanguage('en');
-  const names = ['NVFP4', 'NVFP4-NVIDIA', 'NVFP4-QAD'].map(m => lib.nativeVersionLabel(m));
-  assert.deepEqual(names, ['NVFP4 (Strata’s version)', 'NVFP4 (NVIDIA’s version)', 'NVFP4 (NVIDIA, trained for FP4)']);
-  assert.equal(new Set(names).size, 3);
-  const lines = ['NVFP4', 'NVFP4-NVIDIA', 'NVFP4-QAD'].map(m => lib.versionNote(m));
-  assert.match(lines[0], /best quality/i);
-  assert.match(lines[1], /NVIDIA’s own NVFP4 checkpoint/);
-  assert.match(lines[2], /trained for FP4/);
-  assert.match(lines[2], /faster on short prompts/);
-  assert.equal(lib.versionNote('IQ3_S'), '');
-  assert.equal(lib.nativeShortName('nvfp4-nvfp4-nvidia'), 'NVFP4 (NVIDIA’s version)');
-  for (const language of ['zh', 'ja', 'de', 'es', 'ru', 'pt', 'ko', 'fr', 'he']) {
-    lib.setTranslationLanguage(language);
-    const local = ['NVFP4', 'NVFP4-NVIDIA', 'NVFP4-QAD'].map(m => lib.nativeVersionLabel(m));
-    assert.equal(new Set(local).size, 3, `${language}: three different names`);
-    assert.ok(local.every((n, i) => n !== names[i]), `${language}: translated`);
-    assert.ok(['NVFP4', 'NVFP4-NVIDIA', 'NVFP4-QAD'].every((m, i) => lib.versionNote(m) !== lines[i]), `${language}: the line is translated`);
-  }
-  lib.setTranslationLanguage('en');
 });
 
 test('4d: picture reading is on unless the person turned it off (no saved choice is not "off")', async () => {

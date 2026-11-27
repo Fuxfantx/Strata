@@ -14,7 +14,7 @@ A canonical form that stored the codes as unsigned 0..3 and decoded `code * d` w
 and be wrong on all of them by one step. That is why the source expression is transcribed rather than
 re-derived, and why this test exists.
 
-`docs/pack-format.md` §2.1 says Q2_0 -> S2 splits codes and scales into separate planes with NO value change.
+The pack format (§2.1) says Q2_0 -> S2 splits codes and scales into separate planes with NO value change.
 This checks exactly that claim.
 
 Run: python tools/canonical_xcheck.py [--tensors 4] [--gguf PATH]
@@ -549,7 +549,7 @@ def to_s2(raw: bytes):
 def from_s2(parts):
     """The decode a kernel would do.  Transcribed from `dequantize_row_q2_0`, including the `- 1`.
 
-    One integer subtract then ONE f32 multiply, in that order, for the reason docs/pack-format.md §3.1 gives:
+    One integer subtract then ONE f32 multiply, in that order, for the reason the pack format (§3.1) gives:
     folding the bias into the value domain is not bit-exact.
     """
     codes, scales = parts

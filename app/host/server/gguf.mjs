@@ -3,7 +3,7 @@ import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 const MAX_HEADER = 96 * 1024 ** 2, MAX_COUNT = 2_000_000;
 const widths = { 0:1, 1:1, 2:2, 3:2, 4:4, 5:4, 6:4, 7:1, 10:8, 11:8, 12:8 };
 // ggml block width / bytes. See gguf-py/gguf/constants.py, GGML_QUANT_SIZES.
-const tensorSizes = {0:[1,4],1:[1,2],2:[32,18],3:[32,20],6:[32,22],7:[32,24],8:[32,34],9:[32,36],10:[256,84],11:[256,110],12:[256,144],13:[256,176],14:[256,210],15:[256,292],16:[256,66],17:[256,74],18:[256,98],19:[256,50],20:[32,18],21:[256,110],22:[256,82],23:[256,136],24:[1,1],25:[1,2],26:[1,4],27:[1,8],28:[1,8],29:[256,56],30:[1,2],34:[256,54],35:[256,66],39:[32,17],40:[64,36],41:[128,18],42:[64,18]};
+const tensorSizes = {0:[1,4],1:[1,2],2:[32,18],3:[32,20],6:[32,22],7:[32,24],8:[32,34],9:[32,36],10:[256,84],11:[256,110],12:[256,144],13:[256,176],14:[256,210],15:[256,292],16:[256,66],17:[256,74],18:[256,98],19:[256,50],20:[32,18],21:[256,110],22:[256,82],23:[256,136],24:[1,1],25:[1,2],26:[1,4],27:[1,8],28:[1,8],29:[256,56],30:[1,2],34:[256,54],35:[256,66],39:[32,17],40:[64,36],41:[128,18],42:[64,18],144:[512,196],145:[512,132],146:[512,116],147:[512,100],148:[96,56],149:[96,80],150:[96,32],43:[1,1]};
 export function readGGUF(file) {
  const fd=openSync(file,'r');
  try {
@@ -16,7 +16,7 @@ export function readGGUF(file) {
   function string(keep=true,limit=8*1024**2){const n=u64();if(n>limit)throw new Error('GGUF metadata contains an oversized string.');bounded(n);if(!keep){p+=n;return null;}return bytes(n).toString('utf8');}
   function value(type,keep,depth=0){
    if(type===8)return string(keep);
-   if(type===9){if(depth>4)throw new Error('GGUF metadata arrays are too deeply nested.');const element=u32(),count=u64();if(count>MAX_COUNT)throw new Error('GGUF metadata array is too large.');if(widths[element]){bounded(count*widths[element]);p+=count*widths[element];}else for(let i=0;i<count;i++)value(element,false,depth+1);return {count};}
+   if(type===9){if(depth>4)throw new Error('GGUF metadata arrays are too deeply nested.');const element=u32(),count=u64();if(count>MAX_COUNT)throw new Error('GGUF metadata array is too large.');if(widths[element]){bounded(count*widths[element]);if(keep&&count<=4096){const list=new Array(count);for(let i=0;i<count;i++)list[i]=value(element,true,depth+1);return list;}p+=count*widths[element];}else for(let i=0;i<count;i++)value(element,false,depth+1);return {count};}
    const w=widths[type];if(!w)throw new Error('GGUF metadata uses an unsupported value type.');const b=bytes(w);if(!keep)return null;
    if(type===0||type===7)return b.readUInt8();if(type===1)return b.readInt8();if(type===2)return b.readUInt16LE();if(type===3)return b.readInt16LE();if(type===4)return b.readUInt32LE();if(type===5)return b.readInt32LE();if(type===6)return b.readFloatLE();if(type===10){const n=b.readBigUInt64LE();if(n>BigInt(Number.MAX_SAFE_INTEGER))throw new Error('GGUF integer is too large.');return Number(n);}if(type===11){const n=b.readBigInt64LE();if(n>BigInt(Number.MAX_SAFE_INTEGER)||n<BigInt(Number.MIN_SAFE_INTEGER))throw new Error('GGUF integer is too large.');return Number(n);}return b.readDoubleLE();
   }

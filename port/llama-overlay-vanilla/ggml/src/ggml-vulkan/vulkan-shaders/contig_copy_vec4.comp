@@ -1,0 +1,31 @@
+#version 450
+
+// Same-type 32-bit contiguous copy, four elements per invocation.
+//
+// The buffers are declared as uvec4, so one invocation is one 16-byte load and one 16-byte store.  Declaring them as
+// scalar arrays (the first attempt) left the four accesses separate, and each load then covered a different cache line
+// per warp - four times the transactions.  The host only selects this pipeline when the element count is a multiple of
+// four and both tensors are 16-byte aligned.
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+#if defined(PARAM_BLOCK_ENABLED)
+#define PARAM_BLOCK_BINDING 12
+layout (binding = PARAM_BLOCK_BINDING, std430) readonly buffer parameter {
+#else
+layout(push_constant) uniform parameter {
+#endif
+    uint ne;      // elements
+} p;
+
+layout(binding = 0, std430) readonly  buffer A { uvec4 data_a4[]; };
+layout(binding = 1, std430) writeonly buffer D { uvec4 data_d4[]; };
+
+void main() {
+    // 128 invocations cover one 512-element unit, the grid the scalar path already uses.
+    const uint i4 = gl_GlobalInvocationID.z * 65536u + gl_GlobalInvocationID.y * 128u + gl_GlobalInvocationID.x;
+    if (i4 >= (p.ne >> 2)) {
+        return;
+    }
+    data_d4[i4] = data_a4[i4];
+}

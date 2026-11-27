@@ -345,7 +345,7 @@ for (const scheme of ['light', 'dark']) await scenario(scheme === 'light' ? 'ui2
   console.log('info  version list', JSON.stringify(heads.map(t => t.replace(/\s+/g, ' ').trim())), JSON.stringify(names));
   check(heads[0]?.trim() === 'Recommended', `${scheme}: the list starts with Recommended`);
   check(names.length >= 1 && names.length <= 4, `${scheme}: Recommended shows only the picks this catalog has (at most the fixed four)`, names.join(' | '));
-  check(heads.some(t => /Swift models|GSQ-RCO models|Gyro models|NVFP4 models|Unsloth models/.test(t)), `${scheme}: the other models are in folded groups`);
+  check(heads.some(t => /Swift models|GSQ-RCO models|Gyro models|Unsloth models/.test(t)), `${scheme}: the other models are in folded groups`);
   check(heads.at(-1)?.includes('Use your own GGUF'), `${scheme}: the last row is Use your own GGUF`);
   const tall = await page.locator('.version-row').evaluateAll(els => els.filter(e => e.getBoundingClientRect().height > 44).length);
   check(tall === 0, `${scheme}: every model is one line`, String(tall));

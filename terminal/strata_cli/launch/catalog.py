@@ -22,7 +22,7 @@ from strata_cli.launch import settings as S
 
 
 def _merge_families(cat: Any, families: dict) -> dict:
-    """Flash-Next families plus own-path families (Qwen3.6, Hy4-Flash) so CLI/plan/resolve handle every family setup knows (works with StubCatalog and monkeypatched Catalog)."""
+    """Flash-Next families plus own-path families (Qwen3.6, a family this build imports) so CLI/plan/resolve handle every family setup knows (works with StubCatalog and monkeypatched Catalog)."""
     all_fams = dict(families)
     try:
         strata = getattr(cat, "strata", None)
@@ -30,7 +30,7 @@ def _merge_families(cat: Any, families: dict) -> dict:
             all_fams.update(strata.own_families())
             s = strata.setup_module()
             if s is not None:
-                for tbl in ("OWN_PATH_FAMILIES", "HY4_FAMILIES", "INKLING_FAMILIES"):
+                for tbl in ("OWN_PATH_FAMILIES",):
                     for f, d in (getattr(s, tbl, None) or {}).items():
                         all_fams.setdefault(f, d)
     except Exception:                                  # noqa: BLE001
@@ -125,7 +125,7 @@ class ModelRow:
     disk_free_gb: float | None = None   # ... and what is free in the data folder's drive
     mem_verdict: str = ""         # verdict "disk": the memory verdict it replaced (fits / tight / slower), "" when the disk mark is not set
     mem_words: str = ""
-    offered: bool = True          # False: a quant 0.2.23 no longer offers (Inkling-2-Mini); it is listed only because it is installed, never recommended, never downloaded
+    offered: bool = True          # False: a quant this version no longer offers; it is listed only because it is installed, never recommended, never downloaded
     update: bool = False          # installed, and the installed file is an older one than the one offered now (SQ-20 of 0.2.22 against SQv2-20): never deleted, offered on request
     credit: str = ""              # the line of credit shown with the model (GSQ-RCO: "GSQ + RCO by IST Austria DASLab, Apache-2.0")
     custom: bool = False          # a custom build: the person's own compatible .strata / .gguf files; `id` is its run config's id, `model` its base model
@@ -398,6 +398,16 @@ class Catalog:
         self.strata.data_dir = self.data_dir          # one answer to "where is the data folder" for every caller, the app's included
         self._hardware_override = hardware
 
+    def import_family_for(self, arch: str | None) -> dict | None:
+        """The family a folder of files is, when this build imports that family rather than downloading it.
+
+        Delegated to the server object, which is the one place that reads setup.py's tables: keeping it there
+        means the app and the Terminal answer the question the same way."""
+        try:
+            return self.strata.import_family_for(arch)
+        except Exception:                              # noqa: BLE001 - a missing table means no such family
+            return None
+
     # ---- the computer
     def hardware(self, fresh: bool = False) -> dict:
         if self._hardware_override is not None:
@@ -436,7 +446,7 @@ class Catalog:
         if any(g.get("usable", True) for g in gpus):
             return gpus
         return [({**g, "usable": True, "problem": None,
-                  "note": "experimental: the CUDA 12 engine (docs/OLDER_GPUS.md)"} if g in old else g) for g in gpus]
+                  "note": "experimental: the CUDA 12 engine"} if g in old else g) for g in gpus]
 
     def computer(self, fresh: bool = False) -> Computer:
         hw = self.hardware(fresh)
@@ -478,13 +488,7 @@ class Catalog:
         return [int(c) for c in self.tables()[2]]
 
     def contexts_for(self, family: str | None, model: str | None = None) -> list[int]:
-        """The context sizes to offer for this model: Hy4-Flash's own list (8K..128K), else the shared list."""
-        if family == "hy4-flash":
-            from strata_control import hy4_family
-            return list(hy4_family.CONTEXTS)
-        if family == "inkling-2-mini":
-            from strata_control import inkling_family
-            return list(inkling_family.CONTEXTS)
+        """The context sizes to offer for this model: the shared list (a family's own list is not carried here)."""
         return self.contexts()
 
     def recommendation(self, hw: dict | None = None) -> dict:
@@ -497,9 +501,16 @@ class Catalog:
         vram = comp.main_vram_gb
         rec = self.recommendation(hw)
         out: list[ModelRow] = []
+        own_families = self.strata.own_families()          # Qwen3.6 is listed for the app; the Terminal's launch list is Flash-Next's
         # #5869: every family of the shared table, Qwen3.6-35B-A3B (an engine path of its own) included, as the app lists them: its rows
         # are a group of their own (family_title), the Flash-Next rows are as before
         for fam in self.strata.model_table(hw):
+            if fam["family"] in own_families:
+                # an own-path family is normally not a Terminal choice (setup installs it); one that is imported
+                # rather than downloaded is, once its config exists, because then it starts like any other model
+                if not (own_families[fam["family"]].get("import_only") and any(
+                        self.installed_config(str(sz.get("id"))) for sz in fam["sizes"])):
+                    continue
             for size in fam["sizes"]:
                 f = fit_on(size, hw.get("ram_gb"), vram)
                 cat, words = verdict(size.get("on_this_pc"))
@@ -532,16 +543,6 @@ class Catalog:
             ratio = (gb / base.download_gb) if gb > 0 and base.download_gb > 0 else 1.0
             vram, ram, spill, memory, fit = (round(base.need_vram_gb * ratio, 1), round(base.need_ram_gb * ratio, 1), round(base.spill_gb * ratio, 1),
                                             base.memory_gb * ratio, base.fit_gb * ratio)
-            if hw and e["bytes"] > 0 and e["base_family"] in ("inkling-2-mini", "hy4-flash"):
-                try:                                       # the closest published build's rules with the real size of the files (strata_control/custom_models.py)
-                    from strata_control import custom_models
-                    card = Computer(ram_gb=hw.get("ram_gb"), gpus=list(hw.get("gpus") or []), engine_vendor=self.engine_vendor(hw)).main_vram_gb
-                    placed = custom_models.fit_placement(e["cfg"], float(card) if card else None, float(hw.get("ram_gb") or 0))
-                    if isinstance(placed, dict) and "vram_gb" in placed and "ram_gb" in placed:
-                        vram, ram, spill = round(float(placed["vram_gb"]), 1), round(float(placed["ram_gb"]), 1), round(float(placed.get("ssd_gb") or 0), 1)
-                        memory = fit = vram + ram
-                except Exception:                          # noqa: BLE001 - the scaled figures above stand
-                    pass
             rows.append(dataclasses.replace(
                 base, id=e["id"], custom=True, display_name=e["display_name"], custom_bytes=e["bytes"], installed=self.installed_with_files(e["id"]),
                 recommended=False, offered=True, update=False, experimental=False, credit="", download_gb=round(gb, 1) if gb > 0 else base.download_gb,
@@ -578,17 +579,8 @@ class Catalog:
             if base is not None:
                 try:
                     folder = self.model_folder(base, r.family, r.model)
-                    if r.family == "hy4-flash":
-                        from strata_control import hy4_family
-                        got = sum(f.stat().st_size for f in folder.glob("*.strata")
-                                  if f.name in hy4_family.FILES) / 1e9
-                    elif r.family == "inkling-2-mini":
-                        from strata_control import inkling_family
-                        got = sum(f.stat().st_size for f in folder.glob("*.strata")
-                                  if f.name in inkling_family.ALL_FILES) / 1e9
-                    else:
-                        got = sum(f.stat().st_size for f in folder.glob("*.gguf")
-                                  if not f.name.lower().startswith("mmproj")) / 1e9
+                    got = sum(f.stat().st_size for f in folder.glob("*.gguf")
+                              if not f.name.lower().startswith("mmproj")) / 1e9
                 except OSError:
                     got = 0.0
             need = max(r.download_gb - got, 0.0) + DISK_ROOM_GB
@@ -613,7 +605,11 @@ class Catalog:
         """`iq3_xxs` or `IQ3_XXS` (and an optional family) -> (family, model); raises ValueError with the closest match."""
         models, families, _ctx, _src = self.tables()
         all_families = _merge_families(self, families)
-        names = list(dict.fromkeys([*models, *self.strata.own_size_names()]))
+        # a family with an engine path of its own keeps its sizes out of MODELS; they are still names a person can ask
+        # for (the pack of a family this build imports, Qwen3.6's three files), and the family lookup below is what decides which family offers one
+        names = (list(models)
+                 + [n for n in self.strata.own_size_names() if n not in models]
+                 + [n for n in self.strata.pack_size_names() if n not in models])
         match = next((n for n in names if n.lower() == model.lower()), None)
         if match is None:
             near = S.closest(model, names)
@@ -659,9 +655,6 @@ class Catalog:
         _m, families, _c, _s = self.tables()
         all_families = _merge_families(self, families)
         models = Path(base) / "models"
-        if all_families.get(family, {}).get("hy4") or all_families.get(family, {}).get("inkling"):
-            fam_dir = models / family
-            return {"folder": fam_dir, "rule": "exact" if fam_dir.is_dir() else "fallback", "tried": [{"path": fam_dir, "rule": "exact", "exists": fam_dir.is_dir()}]}
         own = models / (all_families[family].get("tag", "") + model)
         lower = models / self.tag_of(family, model)
         tried = []
@@ -685,13 +678,7 @@ class Catalog:
         return {"folder": own, "rule": "fallback", "tried": tried}
 
     def kv_gb(self, tokens: int, kv: str = "int8", family: str | None = None) -> float:
-        """The conversation memory for this many tokens, in GB (setup.py's UD_FIT_KV_BYTES: 13 attention layers; Hy4-Flash: hy4_fit)."""
-        if family == "hy4-flash":
-            from strata_control import hy4_fit
-            return tokens * hy4_fit.KV_GB_PER_TOKEN
-        if family == "inkling-2-mini":
-            from strata_control import inkling_fit
-            return inkling_fit.kv_cache_gb(tokens)
+        """The conversation memory for this many tokens, in GB (setup.py's UD_FIT_KV_BYTES: 13 attention layers)."""
         mod = self.strata.setup_module()
         table = getattr(mod, "UD_FIT_KV_BYTES", None) or {"fp16": 2112, "int8": 1056, "q4_0": 576, "k8v4": 816}
         return tokens * 13 * table.get(kv, 1056) / 1e9
@@ -701,13 +688,10 @@ class Catalog:
         the one rule of the app, the Terminal and setup). A Mac keeps its unified-memory rule."""
         from strata_control import default_context
         hw = hw or self.hardware()
-        if hw.get("mac") and hw.get("ram_gb") and family not in ("hy4-flash", "inkling-2-mini"):
+        if hw.get("mac") and hw.get("ram_gb"):
             mac = self.strata.mac()                           # a Mac: the context by unified memory (strata_control/mac_fit.py)
             if mac is not None:
                 return int(mac.recommend_context(float(hw["ram_gb"])))
-        if family == "inkling-2-mini":
-            from strata_control import inkling_family
-            return inkling_family.DEFAULT_CONTEXT
         return default_context.pick(self.contexts_for(family, model))
 
     # ---- pictures
@@ -724,10 +708,8 @@ class Catalog:
         return None
 
     def reader_state(self, family: str | None = None) -> str:
-        """"present" when the installed engine carries the picture reader (strata-vision; built into strata-hy4 for Hy4-Flash), "missing" when an engine is installed without it,
+        """"present" when the installed engine carries the picture reader (strata-vision), "missing" when an engine is installed without it,
         "unknown" before any engine is installed (the first launch fetches one that has it)."""
-        if family in ("hy4-flash", "inkling-2-mini"):
-            return "present"
         try:
             from strata_control import engine_component as ec
             rep = ec.status()
@@ -744,8 +726,6 @@ class Catalog:
         """The picture setting nobody chose: off for a model that cannot read pictures or an engine without the reader; else on, with the
         reader the one rule of strata_control/vision_reader.py gives: the CPU reader under 24 GB of graphics memory, the GPU reader from 24 GB,
         on every make of card (owner decision 2026-10-18); on a Mac the Metal reader (unified memory). Without a usable graphics card there is nothing to read on: the CPU reader."""
-        if family in ("hy4-flash", "inkling-2-mini"):
-            return "on" if images else "off"
         from strata_control import vision_reader as VR
         if not images or self.reader_state() == "missing" or self.pictures_not_on_card():
             return "off"
@@ -758,8 +738,8 @@ class Catalog:
     def pictures_not_on_card(self, family: str | None = None) -> bool:
         """T14: an Intel Arc card on Linux whose engine does not carry the picture reader (the engine route that builds the model's pack from the files itself
         fetches none) starts the engine text-only, so offering "Yes" would say "Pictures on" and then answer "I don't see a picture" (USERTEST-LIN, A750).
-        An engine that carries the reader (reader_state "present", the B-series decision of 2026-10-22; or strata-hy4's native SYCL vision) keeps pictures on."""
-        if family in ("hy4-flash", "inkling-2-mini") or not sys.platform.startswith("linux"):
+        An engine that carries the reader (reader_state "present", the B-series decision of 2026-10-22) keeps pictures on."""
+        if not sys.platform.startswith("linux"):
             return False
         try:
             return self.engine_backend() == "sycl" and self.reader_state() != "present"
@@ -839,28 +819,3 @@ class Catalog:
 
     def disk_free(self, path: str | os.PathLike) -> float | None:
         return self.strata.disk_free(Path(path))
-
-    def inkling_source_info(self, path_or_repo: str | os.PathLike) -> dict[str, Any]:
-        """Inspect a local .strata/.gguf/HF safetensors path or community Inkling-2-Mini HF repo.
-
-        Official Strata .strata builds (SQ-20 / SQ-15 / SQ-10 + Vision) remain the default recommendation;
-        this helper exposes local-file and community HF import metadata for TUI/GUI/CLI callers.
-        """
-        s = self.strata.setup_module()
-        raw = str(path_or_repo).strip()
-        sources = dict(getattr(s, "INKLING_COMMUNITY_SOURCES", {}) or {}) if s is not None else {}
-        if raw in sources:
-            return {"kind": "hf_repo", "recommended_default": False, **sources[raw]}
-        for info in sources.values():
-            if info.get("repo") == raw:
-                return {"kind": "hf_repo", "recommended_default": False, **info}
-        fmt = "unknown"
-        if s is not None and hasattr(s, "detect_inkling_source_format"):
-            fmt = s.detect_inkling_source_format(raw)
-        return {
-            "kind": "local",
-            "path": raw,
-            "format": fmt,
-            "recommended_default": fmt == "strata",
-            "community_sources": sources,
-        }

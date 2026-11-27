@@ -246,8 +246,6 @@ class ModelStep(Base):
             big = next(l for l in t.splitlines() if "UD-Q5_K_XL" in l)
             self.assertTrue(big.rstrip().endswith("may run slower"), big)       # 99 GB of weights against 64 GB + 12 GB: a warning, not a block
             self.assertNotIn("SSD ", big)                          # (no "SSD N GB" suffix any more)
-            nv = next(l for l in t.splitlines() if "(NVFP4) NVFP4 " in l)
-            self.assertTrue(nv.rstrip().endswith("may run slower"), nv)       # 76.8 GB of files (128 - 51.2) against 64 GB + 11.9 GB
             for old in ("too big", "fits, a bit slower", "does not fit"):
                 self.assertNotIn(old, t)
             self.assertIn("The n-gram table stays on your SSD", t)
@@ -265,7 +263,7 @@ class ModelStep(Base):
                 self.assertIn("Fits?", t)
                 rec = next(l for l in t.splitlines() if "Qwen3.8-Flash-Next IQ3_S " in l)
                 self.assertIn("fits (recommended)", rec)
-                for model in ("Q2_0", "NVFP4 ", "UD-Q5_K_XL"):
+                for model in ("Q2_0", "Gyro-S ", "UD-Q5_K_XL"):
                     row = next(l for l in t.splitlines() if model in l and "GB" in l)
                     self.assertTrue(any(w in row for w in ("fits", "may run slower", "tight")), row)
                 self.assertTrue(all(len(l) <= 80 for l in t.splitlines()))

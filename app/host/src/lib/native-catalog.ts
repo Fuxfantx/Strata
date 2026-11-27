@@ -1,36 +1,24 @@
 import type {NativeFamily,NativeSize} from './native';
 import {tr} from './i18n';
-import {nvfp4Version} from './native-names';
 import {withCustomBuilds,type CustomRow} from './custom-models';
 export interface CatalogVersion extends NativeSize{sourceFamily:string;edition:string;images:boolean}
 export interface CatalogModel extends Omit<NativeFamily,'sizes'>{sizes:CatalogVersion[]}
-export function nativeVersionLabel(model:string){const nv=nvfp4Version(model);if(nv)return tr(nv.name);return tr(({Q2_0:'Fastest',IQ2_XS:'Compact',IQ3_XXS:'Balanced',IQ3_S:'High quality',IQ1_M:'Coding','Gyro-S':'Smallest','Gyro-M':'Small memory','SQ-64':'Flagship','SQ-96':'High quality','SQ-128':'Highest quality','SQ-20':'Lossless','SQ-15':'Flagship','SQ-10':'Compact'} as Record<string,string>)[model]??model);}
-export const catalogVersionLabel=(version:CatalogVersion)=>{if(version.custom&&version.displayName)return version.displayName;if(version.sourceFamily===INKLING_FAMILY&&/^UD-/i.test(version.model))return `${tr('Unsloth')} · ${version.model}`;if(version.sourceFamily===INKLING_FAMILY&&/^GSQ-RCO-/i.test(version.model))return `GSQ-RCO · ${version.model.replace(/^GSQ-RCO-/i,'')}`;const label=nativeVersionLabel(version.model);return [tr(version.edition),label===version.model&&version.edition?'':label].filter(Boolean).join(' · ');};
+export function nativeVersionLabel(model:string){return tr(({'145B-Q3_K':'145B · Q3_K','120B-Q3_K':'120B · Q3_K',Q2_0:'Fastest',IQ2_XS:'Compact',IQ3_XXS:'Balanced',IQ3_S:'High quality',IQ1_M:'Coding','Gyro-S':'Smallest','Gyro-M':'Small memory'} as Record<string,string>)[model]??model);}
+export const catalogVersionLabel=(version:CatalogVersion)=>{if(version.custom&&version.displayName)return version.displayName;const label=nativeVersionLabel(version.model);return [tr(version.edition),label===version.model&&version.edition?'':label].filter(Boolean).join(' · ');};
 /**
  * Models whose picture files Load fetches by itself (strata_control/pictures.py): the Flash-Next GGUF families, which share the original's reader (Swift has its own file).
- * NVFP4 packs and Qwen3.6 keep the installer for their pictures. With these the Load of a model that is on this computer never runs the installer again just
+ * Qwen3.6 and the imported Hy4 pack keep the installer for their pictures. With these the Load of a model that is on this computer never runs the installer again just
  * because the picture files are missing.
  */
-export const PICTURE_FETCH_FAMILIES = ['qwen', 'coder', 'unsloth', 'gyro', 'swift', 'hy4-flash', 'inkling-2-mini'];
+export const PICTURE_FETCH_FAMILIES = ['qwen', 'coder', 'unsloth', 'gyro', 'swift'];
 export const fetchesPictures = (version: { sourceFamily?: string } | undefined, packaged: boolean | undefined) => !!version && packaged === true && PICTURE_FETCH_FAMILIES.includes(version.sourceFamily ?? '');
-/** The one line that says how a version differs from its neighbours (the three NVFP4 versions); empty for the rest. */
-export const versionNote=(model:string)=>{const nv=nvfp4Version(model);return nv?tr(nv.note):'';};
 /** Whether a display group has a KV-format choice (the Models screen's "Context memory"): Qwen3.6-35B-A3B has none, its engine path ignores --kv and
  *  setup records no format for it, so the select is not shown there (#5919, owner's decision). Every other group keeps it. */
-/** The order of Inkling-2-Mini's versions in every list (owner, 2026-11-26): the Strata packs (SQ-20, SQ-15, SQ-10), then GSQ-RCO IQ3_S, then Unsloth's UD-Q4_K_XL; a quant that is no longer offered (it is
- *  listed only while installed) comes last. Control sends them in this order already; the sort keeps it when an older Control does not. */
-const INKLING_ORDER=['SQ-20','SQ-15','SQ-10','GSQ-RCO-IQ3_S','UD-Q4_K_XL'];
-export const inklingRank=(model:string,offered?:boolean)=>{if(offered===false)return 20;const i=INKLING_ORDER.indexOf(String(model).toUpperCase());return i>=0?i:/^SQ-/i.test(model)?5:/^GSQ-/i.test(model)?6:7;};
-export function orderInklingSizes<T extends {model:string;offered?:boolean;installed?:boolean;custom?:boolean}>(sizes:T[]):T[]{const rank=(s:T)=>s.custom?10:inklingRank(s.model,s.offered);/* the person's own builds come after the official ones */return sizes.filter(s=>s.offered!==false||s.installed).map((s,i)=>({s,i})).sort((a,b)=>rank(a.s)-rank(b.s)||a.i-b.i).map(x=>x.s);}
-export const hasKvChoice=(group?:string)=>group!=='qwen3.6'&&group!==ORNITH_FAMILY&&group!==HY4_FAMILY&&group!==INKLING_FAMILY;
+export const hasKvChoice=(group?:string)=>group!=='qwen3.6'&&group!==ORNITH_FAMILY;
 /** Ornith-1.5-35B-A3B (setup.py OWN_PATH_FAMILIES['ornith'], the Qwen3.6 engine path): a display group of its own, so its Q4_K_M..Q8_0 sizes are not listed under Qwen3.6. */
 export const ORNITH_FAMILY='ornith';
 const isOrnithFamily=(family:{family:string;title?:string})=>family.family===ORNITH_FAMILY||/ornith/i.test(family.title??'');
-/** Tencent Hy4-Flash (setup.py HY4_FAMILIES, its own engine program): a display group of its own; its KV is fp16 and its builds (SQ-64, SQ-96, SQ-128; there is no SQ-32) are placed by the author's rank-cut rule (native-fit.ts hy4Fit). */
-export const HY4_FAMILY='hy4-flash';
-/** Thinking Machines Inkling-2-Mini (setup.py INKLING_FAMILIES, its own shape engine strata-inkling). */
-export const INKLING_FAMILY='inkling-2-mini';
-/** Display groups are distinct from the engine's installation family IDs. */
+/** Edge0 (a downloaded directory pack) and the Hy4 pack a person points Strata at are display groups of their own, with the family ids Control gives them; display groups are distinct from the engine's installation family IDs. */
 export function nativeCatalogModels(families:NativeFamily[],installed?:readonly CustomRow[]|null):CatalogModel[]{
  // The person's own builds (installed rows with custom:true) are versions of their parent model, listed after the official ones.
  const official=officialCatalogModels(families);
@@ -38,14 +26,13 @@ export function nativeCatalogModels(families:NativeFamily[],installed?:readonly 
 }
 function officialCatalogModels(families:NativeFamily[]):CatalogModel[]{
  if(!families.length)return[];
- const groups:CatalogModel[]=[{family:'qwen3.8',title:'Qwen3.8-Flash-Next',about:'',experimental:false,images:false,sizes:[]},{family:'qwen3.6',title:'Qwen3.6-35B-A3B',about:'',experimental:false,images:false,sizes:[]}];
+ const groups:CatalogModel[]=[{family:'qwen3.8',title:'Qwen3.8-Flash-Next',about:'',experimental:false,images:false,sizes:[]},{family:'qwen3.6',title:'Qwen3.6-35B-A3B',about:'',experimental:false,images:false,sizes:[]},{family:'edge0',title:'Edge0',about:'',experimental:false,images:false,sizes:[]},{family:'hy4',title:'Hy4 flash',about:'',experimental:false,images:false,sizes:[]}];
  // Ornith-1.5-35B-A3B (#7134) runs on the Qwen3.6 engine path but is its own model: its sizes are a group of their own, listed after Qwen3.6 only when Control offers them (an older Control does not).
  const ornith:CatalogModel={family:ORNITH_FAMILY,title:'Ornith-1.5-35B-A3B',about:'',experimental:false,images:false,sizes:[]};
  for(const family of families){
-  if(family.family===HY4_FAMILY||family.family===INKLING_FAMILY){groups.push({family:family.family,title:family.title,about:family.about??'',experimental:false,images:family.images,sizes:(family.family===INKLING_FAMILY?orderInklingSizes(family.sizes):family.sizes).map(size=>({...size,sourceFamily:family.family,edition:family.family===INKLING_FAMILY?(/^UD-/i.test(size.model)?'Unsloth':/^GSQ-RCO-/i.test(size.model)?'GSQ-RCO':''):'',images:family.images}))});continue;}
   if(family.feed){groups.push({family:family.family,title:family.title,about:family.about??'',experimental:false,images:family.images,available:family.available,unavailable_reason:family.unavailable_reason,feed:true,sizes:family.sizes.map(size=>({...size,sourceFamily:family.family,edition:'',images:family.images}))});continue;}
   if(isOrnithFamily(family)){ornith.images ||= family.images;ornith.sizes.push(...family.sizes.map(size=>({...size,sourceFamily:family.family,edition:'',images:family.images})));continue;}
-  const target=/qwen3[._-]?6|35b[-_]?a3b/i.test(family.title+' '+family.family)?groups[1]:['qwen','swift','coder','unsloth','gyro'].includes(family.family)||/qwen3[._-]?8|flash.next/i.test(family.title)?groups[0]:undefined;
+  const target=/qwen3[._-]?6|35b[-_]?a3b/i.test(family.title+' '+family.family)?groups[1]:family.family==='edge0'?groups[2]:family.family==='hy4'?groups[3]:['qwen','swift','coder','unsloth','gyro'].includes(family.family)||/qwen3[._-]?8|flash.next/i.test(family.title)?groups[0]:undefined;
   if(!target)continue;
   const edition=target===groups[0]?({swift:'Swift 1.5',coder:'Coder',unsloth:'Unsloth',gyro:'Gyro'} as Record<string,string>)[family.family]??'':'';
   target.images ||= family.images;

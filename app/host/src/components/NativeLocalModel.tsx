@@ -17,7 +17,7 @@ import { cleanDisplayName, customTarget, suggestedDisplayName } from '../lib/cus
 interface Preview { path: string; preview: { model_dir?: string; file_kind?: 'gguf' | 'strata'; plain_issues?: string[]; already_set_up?: { data_dir?: string | null; pack?: string | null } | null; file_count: number; total_bytes: number; file_set_status: string; issues: string[]; messages?: string[]; projectors?: { name: string; status: string; pinned: boolean; plain: string }[]; reads_pictures?: boolean; candidate_selection: { family: string; model: string; custom?: boolean; suggested_label?: string; family_title?: string; base_family?: string; base_model?: string } | null } }
 
 /** The model families Strata's own engines run, in the words of the unsupported-variant message. */
-export const SUPPORTED_FAMILIES_TEXT = 'Strata runs Qwen3.8-Flash-Next, Qwen3.6-35B-A3B, HY-4 Flash and Inkling-2-Mini, and compatible fine-tunes and quantizations of them. Download one from Models, or choose its .strata or .gguf files.';
+export const SUPPORTED_FAMILIES_TEXT = 'Strata runs Qwen3.8-Flash-Next, Qwen3.6-35B-A3B and Ornith-1.5-35B-A3B, and compatible fine-tunes and quantizations of them. Download one from Models, or choose its .strata or .gguf files.';
 
 /** The words for why a folder of model files cannot be used: a sentence and what to do, the checker's own codes under Details. */
 export function problem(issues: string[]): { message: string; next: string } {
@@ -72,13 +72,12 @@ export function NativeLocalModel({ onBack }: { onBack: () => void }) {
         setPending(true);
         setError('');
         try {
-            const isInkling = selection.family === 'inkling-2-mini';
             // A custom build is used from the very file that was picked (the folder can hold the official files too); it is saved under the name the person chose, never over the official build of the same size.
-            const localTarget = isCustom ? customTarget(checked.path, checked.preview.model_dir, true) : isInkling && /\.(gguf|strata)$/i.test(checked.path) ? checked.path : (checked.preview.model_dir ?? checked.path);
+            const localTarget = isCustom ? customTarget(checked.path, checked.preview.model_dir, true) : (checked.preview.model_dir ?? checked.path);
             const customName = isCustom ? cleanDisplayName(label) : '';
             if (isCustom && !customName)
                 throw new Error('Give this model a name.');
-            const result = await nativeAction<NativeJob>('operations', { kind: 'install', args: { family: selection.family, model: selection.model, gguf_dir: localTarget, ...(isCustom ? { custom_label: customName, drafting: 'auto' } : {}), ...(ownDataFolder && !isCustom ? { data_dir: ownDataFolder } : {}), context: isInkling ? 32768 : (native?.catalog?.recommendation?.context ?? 32768), vision: ownFilesVision(checked.preview.projectors, native?.visionReader, native?.installed?.models, selection.family), kv: 'int8', loadAfter: true } });
+            const result = await nativeAction<NativeJob>('operations', { kind: 'install', args: { family: selection.family, model: selection.model, gguf_dir: localTarget, ...(isCustom ? { custom_label: customName, drafting: 'auto' } : {}), ...(ownDataFolder && !isCustom ? { data_dir: ownDataFolder } : {}), context: native?.catalog?.recommendation?.context ?? 32768, vision: ownFilesVision(checked.preview.projectors, native?.visionReader, native?.installed?.models), kv: 'int8', loadAfter: true } });
             setJobId(result.id);
         }
         catch (e) { setError(e instanceof Error ? e.message : String(e)); }

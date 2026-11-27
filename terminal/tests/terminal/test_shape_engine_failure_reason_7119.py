@@ -1,4 +1,4 @@
-"""#7119: when the engine package of a model shape (Inkling's `strata-inkling`) cannot be installed, the app showed "The engine for Inkling-2-Mini could not be
+"""#7119: when the engine package of a model shape (its `strata-<shape>` component) cannot be installed, the app showed "The engine for the model could not be
 installed - See the line above. Nothing was downloaded ..." and there was no line above it (the app shows the stopping line and its hint only).
 
 The hint now carries the real reason: the last line `shape_engine.ensure` said (download error, checksum, no package for this PC, the feed unreachable), and, when a
@@ -22,8 +22,8 @@ sys.path.insert(0, str(ROOT))
 import setup  # noqa: E402
 from strata_control import engine_component as ec, shape_engine  # noqa: E402
 
-SHAPE = "inkling2"
-COMP = "strata-inkling"
+SHAPE = "q4_lite"
+COMP = "strata-q4-lite"
 
 
 class Folders(unittest.TestCase):
@@ -79,7 +79,7 @@ class Hint(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         patches = [mock.patch.dict(os.environ, {"STRATA_COMPONENTS_DIR": self.tmp.name}),
                    mock.patch.dict(os.environ, {"STRATA_ALLOW_NO_ENGINE": "0"}),
-                   mock.patch.object(setup, "SHAPE_ENGINE", {"shape": SHAPE, "title": "Inkling-2-Mini"}),
+                   mock.patch.object(setup, "SHAPE_ENGINE", {"shape": SHAPE, "title": "Q4 Lite Shape"}),
                    mock.patch.object(setup, "say", lambda *a, **k: None),
                    mock.patch("strata_cli.update_cmd._feed_source", lambda *a, **k: "https://feed.invalid/")]
         for p in patches:
@@ -103,23 +103,23 @@ class Hint(unittest.TestCase):
         return errors[0]
 
     def test_the_download_error_is_in_the_hint(self):
-        err = self.stop_with(["Inkling-2-Mini needs its own engine. It downloads separately, and the Strata engine stays as it is.",
-                              "The engine for Inkling-2-Mini could not be downloaded: the checksum of the download does not match"])
-        self.assertEqual(err["message"], "the engine for Inkling-2-Mini could not be installed")
+        err = self.stop_with(["Q4 Lite Shape needs its own engine. It downloads separately, and the Strata engine stays as it is.",
+                              "The engine for Q4 Lite Shape could not be downloaded: the checksum of the download does not match"])
+        self.assertEqual(err["message"], "the engine for Q4 Lite Shape could not be installed")
         self.assertNotIn("See the line above", err["hint"])
         self.assertIn("could not be downloaded: the checksum of the download does not match.", err["hint"])
         self.assertIn("Nothing was downloaded for the model.", err["hint"])
 
     def test_the_first_line_is_not_taken_for_the_reason(self):
-        err = self.stop_with(["Inkling-2-Mini needs its own engine. It downloads separately, and the Strata engine stays as it is.",
-                              "The update feed has no engine for Inkling-2-Mini for this computer."])
-        self.assertIn("no engine for Inkling-2-Mini for this computer.", err["hint"])
+        err = self.stop_with(["Q4 Lite Shape needs its own engine. It downloads separately, and the Strata engine stays as it is.",
+                              "The update feed has no engine for Q4 Lite Shape for this computer."])
+        self.assertIn("no engine for Q4 Lite Shape for this computer.", err["hint"])
         self.assertNotIn("downloads separately", err["hint"])
 
     def test_a_wrong_folder_adds_the_right_one(self):
         place = ec.engine_dir(shape_engine.root(SHAPE, Path(self.tmp.name)))
         (place / "0.1.66-windows-x86_64-cuda").mkdir(parents=True)
-        err = self.stop_with(["The engine for Inkling-2-Mini could not be downloaded: no network"])
+        err = self.stop_with(["The engine for Q4 Lite Shape could not be downloaded: no network"])
         self.assertIn("no network.", err["hint"])
         self.assertIn("A package unpacked by hand", err["hint"])
         self.assertIn(str(place), err["hint"])

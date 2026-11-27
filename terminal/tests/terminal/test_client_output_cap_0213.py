@@ -48,8 +48,8 @@ class OutputCap(unittest.TestCase):
         self.assertEqual((p["package"], sorted(p["settings"])), ("@opencode/ai/providers/openai-compatible", ["apiKey", "baseURL"]))
         model = next(iter(p["models"].values()))
         self.assertTrue(model["capabilities"]["tools"] and model["capabilities"]["reasoning"]["supported"])
-        hy4 = json.loads(harness.render(harness.find("opencode"), harness.target(URL, None, "hy4-flash-q4", 131072))["files"][0]["text"])
-        self.assertEqual(next(iter(hy4["providers"]["strata"]["models"].values()))["name"], "Tencent Hy4-Flash (Strata, local)")
+        hy4 = json.loads(harness.render(harness.find("opencode"), harness.target(URL, None, "qwen3.6-35b-a3b-ud-q4_k_xl", 131072))["files"][0]["text"])
+        self.assertEqual(next(iter(hy4["providers"]["strata"]["models"].values()))["name"], "Qwen3.6-35B-A3B (Strata, local)")
 
 
 class RewriteKeepsTheirCap(unittest.TestCase):

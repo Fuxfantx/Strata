@@ -19,7 +19,7 @@ A second file, `qwen3.8-flash-next-dflash2.strata1.q4_0-bf16sel.pack` (522,458,1
 Training on the outputs of the Qwen3.8-Flash-Next quantizations: the owner of Strata confirmed on 2026-11-06 that the Qwen model terms allow
 training on its outputs.
 
-The idea of the Q4_0 selector tables is nazeshinjite's (Apache-2.0): see `docs/DETAILS.md`, "Credits and licenses".
+The idea of the Q4_0 selector tables is nazeshinjite's (Apache-2.0).
 
 This file and `LICENSE` are copied next to the drafter file (`<data folder>/dflash2/`) when Strata fetches it, and are part of Strata's own
 tree. Strata's code stays MIT ([`LICENSE`](../../../LICENSE)); this drafter's weights are Apache-2.0.

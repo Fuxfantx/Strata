@@ -1,0 +1,33 @@
+#version 450
+
+// out[i] = x[i] / (1 + exp(-x[i])) for a contiguous f32 tensor, one element per invocation.
+//
+// unary.comp has to expand a flat index into four dimensions with magic divisions to support every unary op and every
+// layout; silu's tensors are contiguous and it is dispatched in bulk (96 per token in this model), so this kernel does
+// the index arithmetic with nothing at all.  The expression is the same one op_silu uses, so the bits match.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#if defined(PARAM_BLOCK_ENABLED)
+#define PARAM_BLOCK_BINDING 12
+layout (binding = PARAM_BLOCK_BINDING, std430) readonly buffer parameter
+#else
+layout (push_constant) uniform parameter
+#endif
+{
+    uint n;
+} p;
+
+layout(binding = 0, std430) readonly  buffer A { float data_a[]; };
+layout(binding = 1, std430) writeonly buffer D { float data_d[]; };
+
+void main() {
+    // The grid folds into two dimensions, so a long row (millions of elements at a large ubatch) does not run into
+    // the device's per-dimension workgroup limit.  gl_NumWorkGroups is the x count the host actually used.
+    const uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * gl_WorkGroupSize.x);
+    if (i >= p.n) {
+        return;
+    }
+    const float x = data_a[i];
+    data_d[i] = x / (1.0f + exp(-x));
+}

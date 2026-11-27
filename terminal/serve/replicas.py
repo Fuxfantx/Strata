@@ -53,35 +53,99 @@ class ReplicaConfigError(ValueError):
 
 
 def gpu_groups(cfg: dict) -> list[list[int]]:
-    """The cards of each replica, from the config's "replicas" (see the module doc); [] when there are none or one."""
+    """The cards of each replica, from the config's "replicas" (see the module doc); [] when there are none or one.
+
+    An entry may be `{"backend": "cpu"}` instead of carrying cards: that replica runs the engine's CPU backend.  That is the
+    only way to get a second worker on a machine with one integrated GPU, and it is worth having - measured on the X2 Elite,
+    a Vulkan engine and a CPU engine on the same mapped pack serve 9.34 + 3.40 = 12.74 tok/s against 9.14 for the Vulkan one
+    alone (+39% aggregate), because two processes that map the same file share its pages (port/docs/PERFORMANCE.md section 9.4).
+    A replica with no cards **and no backend** stays an error: an empty "gpus" is almost always a mistake, not a CPU worker."""
     spec = cfg.get("replicas")
     if spec is None or spec is False:
         return []
     cards = _cards(cfg.get("gpu"))
     if isinstance(spec, bool) or (not isinstance(spec, (int, list))):
-        raise ReplicaConfigError(f'"replicas" must be a number or a list of {{"gpus": [...]}}, not {spec!r}')
+        raise ReplicaConfigError(f'"replicas" must be a number or a list of {{"gpus": [...]}} or {{"backend": "cpu"}}, '
+                                 f'not {spec!r}')
     if isinstance(spec, int):
         if spec <= 1:
             return []
         if not cards:
-            raise ReplicaConfigError(f'"replicas": {spec} needs the "gpu" list to cut into groups (e.g. "gpu": [0, 1, 2, 3])')
+            raise ReplicaConfigError(f'"replicas": {spec} needs the "gpu" list to cut into groups (e.g. "gpu": [0, 1, 2, 3]), '
+                                     f'or name the replicas (e.g. [{{"gpus": [0]}}, {{"backend": "cpu"}}])')
         if len(cards) % spec:
             raise ReplicaConfigError(f'"replicas": {spec} does not divide the {len(cards)} cards {cards} evenly: name the '
                                      f'groups ("replicas": [{{"gpus": [0, 1]}}, ...]) or change the count')
         n = len(cards) // spec
         return [cards[i * n:(i + 1) * n] for i in range(spec)]
-    groups = []
+    groups, is_cpu = [], []
     for e in spec:
-        g = e.get("gpus") if isinstance(e, dict) else e
-        groups.append(_cards(g))
-    if any(not g for g in groups):
-        raise ReplicaConfigError('every replica needs its cards: {"gpus": [0, 1]}')
+        cpu = isinstance(e, dict) and _is_cpu_replica(e)
+        is_cpu.append(cpu)
+        groups.append([] if cpu else _cards(e.get("gpus") if isinstance(e, dict) else e))
+    if any(not g and not cpu for g, cpu in zip(groups, is_cpu)):
+        raise ReplicaConfigError('every replica needs its cards ({"gpus": [0, 1]}) or the CPU backend ({"backend": "cpu"})')
     flat = [c for g in groups for c in g]
     if len(set(flat)) != len(flat):
         raise ReplicaConfigError(f"a card is in two replicas: {groups}")
     if len(groups) < 2:
         return []
     return groups
+
+
+def _is_cpu_replica(entry: dict) -> bool:
+    """Whether this replica entry asks for the CPU backend rather than cards.  Absent "backend" means cards."""
+    backend = entry.get("backend")
+    if backend is None:
+        return False
+    name = str(backend).strip().lower()
+    if name == "cpu":
+        return True
+    raise ReplicaConfigError(f'a replica\'s "backend" is "cpu" or nothing, not {backend!r}')
+
+
+def with_cpu_replicas(cfg: dict, n_cpu: int) -> dict:
+    """`n_cpu` extra replicas on the CPU backend, added to whatever card replicas the config already names.
+
+    This is the `--replicas-cpu N` form, and it exists because a machine with one integrated GPU has no card list to cut: the only
+    second worker it can have is the CPU backend.  The result is a "replicas" list, which gpu_groups then reads as usual, so a
+    config that already names groups keeps them and gets the CPU ones appended.  A negative count is a mistake and says so."""
+    if n_cpu is None or n_cpu == 0:
+        return cfg
+    if n_cpu != int(n_cpu):
+        raise ReplicaConfigError(f'"replicas-cpu" must be a whole number, not {n_cpu!r}')
+    if n_cpu < 0:
+        raise ReplicaConfigError(f'"replicas-cpu" cannot be negative ({n_cpu!r})')
+    spec = cfg.get("replicas")
+    if spec is None or spec is False:
+        groups: list = [_cards(cfg.get("gpu"))]                 # the single card as replica 0; [] when there is no card at all
+    elif isinstance(spec, int) and not isinstance(spec, bool):
+        groups = gpu_groups(cfg) or [_cards(cfg.get("gpu"))]
+    elif isinstance(spec, list):
+        groups = [e for e in spec]
+    else:
+        raise ReplicaConfigError(f'"replicas" must be a number or a list, not {spec!r}')
+    if not groups or not _group_has_work(groups[0]):
+        raise ReplicaConfigError('"replicas-cpu" adds CPU workers beside a card: name the card with "gpu" (or "replicas") first')
+    out = copy.deepcopy(cfg)
+    out["replicas"] = [dict(g) if isinstance(g, dict) else {"gpus": _cards(g)} for g in groups] + \
+                      [{"backend": "cpu"} for _ in range(int(n_cpu))]
+    return out
+
+
+def _group_has_work(entry) -> bool:
+    """Whether this group names at least one card (card 0 is falsy, so this cannot be a truth test on the group)."""
+    if isinstance(entry, dict):
+        return _is_cpu_replica(entry) or bool(_cards(entry.get("gpus")))
+    return bool(_cards(entry))
+    """Whether this replica entry asks for the CPU backend rather than cards.  Absent "backend" means cards."""
+    backend = entry.get("backend")
+    if backend is None:
+        return False
+    name = str(backend).strip().lower()
+    if name == "cpu":
+        return True
+    raise ReplicaConfigError(f'a replica\'s "backend" is "cpu" or nothing, not {backend!r}')
 
 
 def _cards(g) -> list[int]:
@@ -250,12 +314,17 @@ def _suffixed(path, i: int):
 
 
 def replica_cfg(cfg: dict, i: int, gpus: list[int]) -> dict:
-    """The config of replica i: its own cards, log and learned-profile file; the entry's "env" and "args" added."""
+    """The config of replica i: its own cards, log and learned-profile file; the entry's "env" and "args" added.
+
+    An empty `gpus` is the CPU-backend replica (see gpu_groups).  It carries no card - "gpu" is None, so every card-reading
+    helper here (gpu_list and the roles behind it) sees a config with no cards and the engine is not asked for a layer split - and
+    the backend is named in the args instead, `--gpu cpu`, which is how the native engine spells it.  Every other card handling
+    is unchanged."""
     c = copy.deepcopy(cfg)
     spec = cfg.get("replicas")
     entry = spec[i] if isinstance(spec, list) and isinstance(spec[i], dict) else {}
     c.pop("replicas", None)
-    c["gpu"] = gpus if len(gpus) > 1 else gpus[0]
+    c["gpu"] = None if not gpus else (gpus if len(gpus) > 1 else gpus[0])
     c.pop("hip_ordinal", None)                 # a one-card config's Windows ordinal: not for a group
     c["log"] = _suffixed(cfg.get("log"), i)
     if cfg.get("expert_profile_save"):
@@ -264,7 +333,19 @@ def replica_cfg(cfg: dict, i: int, gpus: list[int]) -> dict:
         c["env"] = {**(c.get("env") or {}), **{str(k): str(v) for k, v in entry["env"].items()}}
     if entry.get("args"):
         c["args"] = list(c["args"]) + [str(x) for x in entry["args"]]
+    if not gpus:
+        c["args"] = _with_gpu_cpu(list(c["args"]))
     return c
+
+
+def _with_gpu_cpu(args: list) -> list:
+    """`--gpu cpu` once, at the end, unless the run settings already name the backend."""
+    for i, a in enumerate(args):
+        if a == "--gpu" and i + 1 < len(args):
+            return args
+        if a.startswith("--gpu="):
+            return args
+    return args + ["--gpu", "cpu"]
 
 
 def cpu_sets(n: int, enabled: bool = True):

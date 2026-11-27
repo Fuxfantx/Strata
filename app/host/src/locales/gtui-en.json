@@ -6,7 +6,7 @@
  "cm01": "Use local model files (.strata or .gguf)…",
  "cm02": "Already have a supported model on this computer, such as a compatible fine-tune or quantization? Choose the folder that holds its files, or one of its .strata or .gguf files. Strata checks them, prepares the model and loads it. Nothing is copied or downloaded, and your files are never changed.",
  "cm03": "Folder with the model files, or one .strata or .gguf file",
- "cm04": "Strata runs Qwen3.8-Flash-Next, Qwen3.6-35B-A3B, HY-4 Flash and Inkling-2-Mini, and compatible fine-tunes and quantizations of them. Download one from Models, or choose its .strata or .gguf files.",
+ "cm04": "Strata runs Qwen3.8-Flash-Next, Qwen3.6-35B-A3B and Ornith-1.5-35B-A3B, and compatible fine-tunes and quantizations of them. Download one from Models, or choose its .strata or .gguf files.",
  "cm05": "Check that the folder holds complete .strata or .gguf files, then try again. The file named under Details says what is wrong with it.",
  "cm06": "Custom build",
  "cm07": "Closest build:",

@@ -79,14 +79,6 @@ class EngineArgsBudget(unittest.TestCase):
         self.assertEqual(len(line), 1)
         self.assertTrue(line[0].startswith("[strata] conversation cache: "))
 
-    def test_hy4_and_inkling_never_get_it(self):
-        for cfg in ({"args": ["--model", "x"], "arch": "hy4flash"}, {"args": ["--model", "x"], "arch": "inkling2"}):
-            with mock.patch.object(server.hy4_kind, "is_hy4", return_value=cfg["arch"] == "hy4flash"), \
-                    mock.patch.object(server.inkling_kind, "is_inkling", return_value=cfg["arch"] == "inkling2"), \
-                    mock.patch.object(server.hy4_kind, "engine_args", return_value=["--a"]), \
-                    mock.patch.object(server.inkling_kind, "engine_args", return_value=["--a"]):
-                self.assertEqual(server.engine_args(cfg, "strata", announce=False), ["--a"])
-
 
 if __name__ == "__main__":
     unittest.main()

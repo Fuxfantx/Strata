@@ -383,11 +383,6 @@ def inspect(config_path: Path | None, *, profile_id: str | None = None, live: bo
             else:
                 components.append({"name": f"vision/{key}", "status": "invalid", "kind": "file",
                                    "required": True, "reason": "missing path"})
-    elif str(cfg.get("arch") or "").lower() in ("hy4flash", "inkling2_loop") and "--vision" in args:
-        vi = args.index("--vision")
-        if vi + 1 < len(args) and isinstance(args[vi + 1], str) and args[vi + 1] and not args[vi + 1].startswith("--"):
-            components.append(_item("vision/mmproj", _location(args[vi + 1], cfg, config_path, active_engine_dir=active_engine_dir), "file"))
-
     components.append(_monitor_component())
     driver_name = "rocminfo" if cfg.get("backend") == "hip" else "nvidia-smi"
     components.append({"name": "gpu_driver_probe", "status": "unverified", "kind": "external_tool",
@@ -445,7 +440,7 @@ def _cpu_flags(cpuinfo: str = "/proc/cpuinfo") -> set[str] | None:
 
 def _cpu_pack_issue(cfg: dict, config_path: Path, cpuinfo: str = "/proc/cpuinfo") -> dict | None:
     """The canonical Q2_0 pack (a --pack folder with index.txt and no native_experts.txt) has an AVX-512 CPU kernel; the engine stops at
-    start on any other CPU with "this CPU cannot run the expert kernel". An i-quant, NVFP4 or Unsloth pack (native_experts.txt) runs on AVX2
+    start on any other CPU with "this CPU cannot run the expert kernel". An i-quant or Unsloth pack (native_experts.txt) runs on AVX2
     CPUs. None when it is fine, cannot apply (a pack of another engine, a CPU whose flags cannot be read) or there is no such pack."""
     args = cfg.get("args") or []
     if "--pack" not in args or args.index("--pack") + 1 >= len(args):

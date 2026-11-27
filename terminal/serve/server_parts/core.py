@@ -81,8 +81,8 @@ NO_LINE = object()                                   # StrataEngine.generate: no
 
 
 def token_limit(value, name: str):
-    """#4037: a reply's token limit (max_tokens, max_completion_tokens) is a whole number: 1 or more, or -1 / 0 for no cap
-    (docs/DETAILS.md).  None (absent or null) stays None.  A whole number written as a float (4096.0) or as a string of
+    """#4037: a reply's token limit (max_tokens, max_completion_tokens) is a whole number: 1 or more, or -1 / 0 for no cap.
+    None (absent or null) stays None.  A whole number written as a float (4096.0) or as a string of
     digits with an optional sign ("1024": clients rely on it, as int() always took it) is converted.  A boolean, a fraction
     (2.5, "2.5"), any other string or any other type is refused: int() used to turn true into 1 and 2.5 into 2.
     ValueError = a 400."""

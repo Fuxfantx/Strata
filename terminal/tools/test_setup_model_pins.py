@@ -66,8 +66,8 @@ class EveryFileIsPinned(unittest.TestCase):
 
     def test_every_shard_of_every_choice(self):
         for fam_name, fam in {**setup.FAMILIES, **setup.OWN_PATH_FAMILIES}.items():
-            if fam.get("ready"):                       # ready-made packs: pinned file by file (ready_files)
-                continue
+            if fam.get("import_only"):                 # a pack the person already has: nothing is downloaded, so
+                continue                               # there is no file of ours to pin
             for model in (setup.MODELS if fam_name in setup.FAMILIES else fam["models"]):
                 if fam_name in setup.FAMILIES and fam_name not in setup.MODELS[model].get("families", ("qwen", "swift")):
                     continue
@@ -80,14 +80,17 @@ class EveryFileIsPinned(unittest.TestCase):
 
     def test_the_picture_reader_of_every_family(self):
         for name, fam in {**setup.FAMILIES, **setup.OWN_PATH_FAMILIES}.items():
+            if fam.get("import_only"):                 # its image encoder comes with the pack, not from a download
+                continue
             with self.subTest(family=name):
                 self.pinned(fam["mmproj_hf"] + fam["mmproj"])
 
-    def test_the_nvfp4_packs_still_pin_their_files(self):
-        for model in setup.MODELS:
-            if setup.MODELS[model].get("repo"):
-                for f in setup.ready_files(model):
-                    self.assertRegex(f[5], HEX)
+    def test_a_pack_family_names_a_repository_on_every_host_it_supports(self):
+        for name, fam in setup.PACK_FAMILIES.items():
+            for size, d in fam["sizes"].items():
+                sources = d.get("sources") or {}
+                self.assertTrue(sources, f"{name} {size}")
+                self.assertTrue(all(repo for repo in sources.values()), f"{name} {size}")
 
     def test_every_pin_is_well_formed_and_every_repository_is_pinned(self):
         for repo, files in setup.REPO_PINS.items():
@@ -99,9 +102,9 @@ class EveryFileIsPinned(unittest.TestCase):
                     self.assertRegex(sha, HEX)
 
     def test_known_values(self):
-        # the Hub's LFS pointers; the picture reader is the same file the NVFP4 family already pinned
+        # the Hub's LFS pointers; the picture reader is the original's file, pinned once in ISTA_FILES
         self.assertEqual(setup.file_pin(pinned_url("mmproj-Qwen3.8-Flash-Next-BF16.gguf")),
-                         setup.FAMILIES["nvfp4"]["mmproj_sha256"])
+                         setup.ISTA_FILES["mmproj-Qwen3.8-Flash-Next-BF16.gguf"])
         self.assertEqual(setup.file_pin(pinned_url("Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf")),
                          (37623740192, "69820c02ec7d0b45ef2ebb19d6620299db749fe2aded7f39f93c6b88b199b720"))
         # the n-gram table is one file for the four sizes and the Coder

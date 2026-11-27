@@ -37,7 +37,7 @@ test('a .strata file without the magic, a cut-short file, a helper shard and a f
   assert.throws(() => inspectLocalModel(bad), /STRATA header/);
   const tiny = join(root, 'tiny.strata'); writeFileSync(tiny, MAGIC);
   assert.throws(() => inspectLocalModel(tiny), /empty or cut short/);
-  const vision = join(root, 'Inkling-2-Mini-Vision.strata'); strataFixture(vision);
+  const vision = join(root, 'Qwen3.8-Flash-Next-Vision.strata'); strataFixture(vision);
   assert.throws(() => inspectLocalModel(vision), /picture reader or helper/);
   mkdirSync(join(root, 'dir.strata'));
   assert.throws(() => inspectLocalModel(join(root, 'dir.strata')), /rather than its folder/);
@@ -62,9 +62,9 @@ test('folder browsing lists .strata and .gguf files and still hides other files'
   assert.equal(listing.entries.find(e => e.name === 'model.strata').kind, 'model');
 });
 
-test('GGUF files of Strata engine architectures (inkling2, inkling2_loop, hy4) are accepted; unrelated ones keep the Custom Model API guidance', t => {
+test('GGUF files of Strata engine architectures (hy_v4, hy_v4_flash) are accepted; unrelated ones keep the Custom Model API guidance', t => {
   const root = fixture(t);
-  for (const arch of ['inkling2', 'inkling2_loop', 'hy4', 'hy4flash', 'qwen35moe', 'qwen4exp']) {
+  for (const arch of ['hy_v4', 'hy_v4_flash', 'qwen35moe', 'qwen4exp']) {
     const file = join(root, `${arch}.gguf`); ggufFixture(file, { arch });
     assert.equal(inspectLocalModel(file).variant.local.architecture, arch);
   }
@@ -100,25 +100,24 @@ const size = (id, model, gb, extra = {}) => ({ id, model, about: '', download_gb
 const families = () => [
   { family: 'qwen', title: 'Qwen3.8-Flash-Next', about: '', experimental: false, images: true, sizes: [size('q2_0', 'Q2_0', 10)] },
   { family: 'qwen36', title: 'Qwen3.6-35B-A3B', about: '', experimental: false, images: false, sizes: [size('qwen36-ud-iq4_xs', 'UD-IQ4_XS', 20)] },
-  { family: 'hy4-flash', title: 'HY-4 Flash', about: '', experimental: false, images: true, sizes: [size('hy4-flash-sq-64', 'SQ-64', 60, { hy4: { placement: { vram_gb: 1, ram_gb: 2, ssd_gb: 3 }, mode: 'ram_vram_zero_ssd', recommended: true, unified: false, engram_gb: 1 } })] },
-  { family: 'inkling-2-mini', title: 'Inkling-2-Mini', about: '', experimental: false, images: true, sizes: [size('inkling-2-mini-sq-20', 'SQ-20', 20, { inkling: { placement: { vram_gb: 1, ram_gb: 2, ssd_gb: 3 }, mode: 'full_vram', recommended: true, unified: false, context: 32768, kv_gb: 1 } }), size('inkling-2-mini-sq-15', 'SQ-15', 15)] },
+  { family: 'ornith', title: 'Ornith-1.5-35B-A3B', about: '', experimental: false, images: true, sizes: [size('ornith-1.5-35b-a3b-q4_k_m', 'Q4_K_M', 20)] },
+  { family: 'hy4', title: 'Hy4 flash', about: '', experimental: false, images: false, sizes: [size('hy4-compact', 'Compact', 60, { import_only: true })] },
 ];
 const row = (model, base_family, base_model, extra = {}) => ({ model, config: `strata-${model}.json`, model_name: `${model} alias`, ready: true, custom: true, display_name: `Mine ${model}`, base_family, base_model, custom_bytes: 12 * 1024 ** 3, ...extra });
 const official = (model) => ({ model, config: `strata-${model}.json`, model_name: model, ready: true });
 
 test('installed custom builds join their parent model in the version list, beside the official builds', async () => {
   const { nativeCatalogModels, catalogVersionLabel } = await bundle('./src/lib/native-catalog');
-  const installed = [official('q2_0'), official('qwen36-ud-iq4_xs'), official('hy4-flash-sq-64'), official('inkling-2-mini-sq-20'),
-    row('custom-q38', 'qwen', 'Q2_0'), row('qwen36-custom-a', 'qwen36', 'UD-IQ4_XS'), row('hy4-flash-custom-a', 'hy4-flash', 'SQ-64'),
-    row('inkling-2-mini-custom-a', 'inkling-2-mini', 'SQ-20'), row('inkling-2-mini-custom-b', 'inkling-2-mini', 'SQ-15', { display_name: 'Merge B' })];
+  const installed = [official('q2_0'), official('qwen36-ud-iq4_xs'), official('ornith-1.5-35b-a3b-q4_k_m'), official('hy4-compact'),
+    row('custom-q38', 'qwen', 'Q2_0'), row('qwen36-custom-a', 'qwen36', 'UD-IQ4_XS'), row('ornith-custom-a', 'ornith', 'Q4_K_M')];
   const groups = nativeCatalogModels(families(), installed);
   const byFamily = Object.fromEntries(groups.map(g => [g.family, g]));
-  assert.deepEqual(groups.map(g => g.family), ['qwen3.8', 'qwen3.6', 'hy4-flash', 'inkling-2-mini']);
+  assert.deepEqual(groups.map(g => g.family), ['qwen3.8', 'qwen3.6', 'ornith', 'edge0', 'hy4']);
   assert.deepEqual(byFamily['qwen3.8'].sizes.map(s => s.id), ['q2_0', 'custom-q38']);
   assert.deepEqual(byFamily['qwen3.6'].sizes.map(s => s.id), ['qwen36-ud-iq4_xs', 'qwen36-custom-a']);
-  assert.deepEqual(byFamily['hy4-flash'].sizes.map(s => s.id), ['hy4-flash-sq-64', 'hy4-flash-custom-a']);
-  assert.deepEqual(byFamily['inkling-2-mini'].sizes.map(s => s.id), ['inkling-2-mini-sq-20', 'inkling-2-mini-sq-15', 'inkling-2-mini-custom-a', 'inkling-2-mini-custom-b']);
-  for (const g of groups) {
+  assert.deepEqual(byFamily['ornith'].sizes.map(s => s.id), ['ornith-1.5-35b-a3b-q4_k_m', 'ornith-custom-a']);
+  assert.deepEqual(byFamily['hy4'].sizes.map(s => s.id), ['hy4-compact']);
+  for (const g of groups.filter(g => g.sizes.some(s => s.custom))) {
     const custom = g.sizes.filter(s => s.custom), official = g.sizes.filter(s => !s.custom);
     assert.ok(custom.length && official.length, `${g.family} lists both kinds`);
     for (const c of custom) {
@@ -128,10 +127,8 @@ test('installed custom builds join their parent model in the version list, besid
       assert.ok(!official.some(o => o.id === c.id), 'distinct ids');
     }
   }
-  const c = byFamily['inkling-2-mini'].sizes.find(s => s.id === 'inkling-2-mini-custom-a');
-  assert.equal(c.model, 'SQ-20'); assert.equal(c.sourceFamily, 'inkling-2-mini'); assert.equal(c.inkling.recommended, false);
-  assert.equal(byFamily['hy4-flash'].sizes[1].hy4.recommended, false);
-  assert.equal(byFamily['hy4-flash'].sizes[0].hy4.recommended, true, 'the official pick is unchanged');
+  const c = byFamily['ornith'].sizes.find(s => s.id === 'ornith-custom-a');
+  assert.equal(c.model, 'Q4_K_M'); assert.equal(c.sourceFamily, 'ornith');
 });
 
 test('a custom build\'s memory figures follow its real file size, not the official size of the build it is closest to', async () => {
@@ -155,16 +152,16 @@ test('the display name starts from the check, else the file name, and is cleaned
   const { suggestedDisplayName, cleanDisplayName, customTarget, customGroupOf, CUSTOM_FILE_TYPES } = await bundle('./src/lib/custom-models');
   assert.equal(suggestedDisplayName('Orca Merge', '/x/y.gguf'), 'Orca Merge');
   assert.equal(suggestedDisplayName('', '/models/My-Merge-00001-of-00003.gguf'), 'My-Merge');
-  assert.equal(suggestedDisplayName(undefined, 'C:\\models\\Inkling Tune.strata'), 'Inkling Tune');
+  assert.equal(suggestedDisplayName(undefined, 'C:\\models\\Qwen Tune.strata'), 'Qwen Tune');
   assert.equal(suggestedDisplayName('  ', ''), '');
   assert.equal(cleanDisplayName('a<b>:c|d'), 'a b c d');
   assert.equal(cleanDisplayName('z'.repeat(200)).length, 80);
   assert.equal(customTarget('/m/x.strata', '/m', true), '/m/x.strata');
   assert.equal(customTarget('/m', '/m', true), '/m');
   assert.equal(customTarget('/m/x.gguf', '/m', false), '/m');
-  assert.deepEqual([customGroupOf('qwen'), customGroupOf('unsloth'), customGroupOf('qwen36'), customGroupOf('hy4-flash'), customGroupOf('inkling-2-mini'), customGroupOf('ornith'), customGroupOf('x')], ['qwen3.8', 'qwen3.8', 'qwen3.6', 'hy4-flash', 'inkling-2-mini', 'ornith', undefined]);
-  assert.deepEqual(CUSTOM_FILE_TYPES['hy4-flash'], ['strata']);
-  assert.deepEqual(CUSTOM_FILE_TYPES['inkling-2-mini'], ['strata', 'gguf']);
+  assert.deepEqual([customGroupOf('qwen'), customGroupOf('unsloth'), customGroupOf('qwen36'), customGroupOf('ornith'), customGroupOf('qwen3.8'), customGroupOf('hy4'), customGroupOf('edge0'), customGroupOf('x')], ['qwen3.8', 'qwen3.8', 'qwen3.6', 'ornith', 'qwen3.8', undefined, undefined, undefined]);
+  assert.deepEqual(CUSTOM_FILE_TYPES['ornith'], ['gguf']);
+  assert.deepEqual(CUSTOM_FILE_TYPES['qwen3.6'], ['gguf']);
 });
 
 test('the chat picker names a custom build by its display name', async () => {
@@ -174,10 +171,10 @@ test('the chat picker names a custom build by its display name', async () => {
   assert.deepEqual(pickerNativeModels(rows, [{ label: 'My Merge' }]).map(r => r.model), ['q2_0']);
 });
 
-test('the import screens say .strata and .gguf, list all four engine families and keep llama-server guidance for other architectures', async () => {
+test('the import screens say .strata and .gguf, list the engine families and keep llama-server guidance for other architectures', async () => {
   const screen = await src('src/components/NativeLocalModel.tsx'), dialog = await src('src/components/LocalModelImport.tsx'), picker = await src('src/components/VersionPicker.tsx'), models = await src('src/components/NativeModels.tsx');
   for (const text of [screen, models, picker]) assert.match(text, /Use local model files \(\.strata or \.gguf\)…/);
-  for (const family of ['Qwen3.8-Flash-Next', 'Qwen3.6-35B-A3B', 'HY-4 Flash', 'Inkling-2-Mini']) assert.ok(screen.includes(family), family);
+  for (const family of ['Qwen3.8-Flash-Next', 'Qwen3.6-35B-A3B', 'Ornith-1.5-35B-A3B']) assert.ok(screen.includes(family), family);
   assert.doesNotMatch(screen, /Use a local GGUF/);
   assert.match(dialog, /\\\.\(gguf\|strata\)\$/);
   assert.match(screen, /Custom model API instead: start it with llama-server/, 'unrelated architectures keep the Custom Model API guidance');

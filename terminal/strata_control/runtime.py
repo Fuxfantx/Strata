@@ -111,7 +111,7 @@ def _supported() -> None:
     POSIX uses an owner-private ``AF_UNIX`` socket. Windows uses a loopback-only TCP listener whose
     authority rests on the 256-bit control token plus a ``0700`` state directory, because the Python
     standard library cannot create a named pipe with a security descriptor; the difference is
-    recorded in ``owner_transport`` and in ``history/docs/work/IMPLEMENTATION_STATUS.md`` rather than being
+    recorded in ``owner_transport`` rather than being
     presented as equivalent. Anything else is refused.
     """
     if os.name == "nt" or (os.name == "posix" and hasattr(socket, "AF_UNIX")):
@@ -1376,7 +1376,7 @@ class Host:
                 # #5956: the stop phase's own worst case (the drain, then the kill and the reap: Host._stop_child) and, apart from it, what the last
                 # stop here took. last_teardown_s is informational: a fast stop says nothing about the next one, so no client may wait less than
                 # the limit. A restart's whole budget is teardown_limit_s + its startup wait, and on a failed load another
-                # teardown_limit_s + startup wait for the rollback (docs/MANAGEMENT_PROTOCOL.md).
+                # teardown_limit_s + startup wait for the rollback.
                 "teardown_limit_s": round(self.shutdown_timeout + STOP_KILL_GRACE + STOP_REAP_WAIT, 1),
                 "last_teardown_s": self.last_teardown_s,
                 "would_drain": False, "would_start": False}

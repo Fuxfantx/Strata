@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from serve import appendlog, frontend as F, hy4_kind, inkling_kind, responses, server
+from serve import appendlog, frontend as F, responses, server
 from serve.server_parts import engines
 
 
@@ -255,7 +255,7 @@ class Issue6467WindowsAppendLogFdTests(unittest.TestCase):
 
 
 class Issue6497ThreadLimitTests(unittest.TestCase):
-    """#6497: Configured --pool-workers thread cap is propagated to OMP_NUM_THREADS and translated for Hy4/Inkling."""
+    """#6497: Configured --pool-workers thread cap is propagated to OMP_NUM_THREADS."""
 
     def test_child_env_sets_omp_num_threads_from_pool_workers(self):
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -264,16 +264,6 @@ class Issue6497ThreadLimitTests(unittest.TestCase):
             # Explicit OMP_NUM_THREADS in cfg["env"] is respected
             env2 = server.child_env({"args": ["--pool-workers", "7"], "env": {"OMP_NUM_THREADS": "4"}})
             self.assertEqual(env2.get("OMP_NUM_THREADS"), "4")
-
-    def test_hy4_and_inkling_translate_pool_workers_to_threads(self):
-        with mock.patch.object(hy4_kind, "probe", return_value={"drafter": "dfly2", "images": "1"}):
-            out = hy4_kind.engine_args({"args": ["--native", "m.strata", "--pool-workers", "7"], "drafting": "off"})
-            self.assertNotIn("--pool-workers", out)
-            self.assertEqual(out[out.index("--threads") + 1], "7")
-        with mock.patch.object(inkling_kind, "probe", return_value={"drafter": "dspark", "images": "1"}):
-            out = inkling_kind.engine_args({"args": ["--native", "m.strata", "--pool-workers", "7"], "drafting": "off"})
-            self.assertNotIn("--pool-workers", out)
-            self.assertEqual(out[out.index("--threads") + 1], "7")
 
 
 class Issue6460AnthropicNearContextLimitTests(unittest.TestCase):

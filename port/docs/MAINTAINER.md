@@ -1,0 +1,165 @@
+# Maintaining the vendored tree, the overlay and the gates
+
+`third_party/llama.cpp` is vanilla `ggml-org/llama.cpp` at the pinned commit with `port/llama-overlay-vanilla/` copied
+over it. This file says how that composition is produced, how the fork is synced, and what has to pass before a change
+lands.
+
+## Composition
+
+| part | content |
+| --- | --- |
+| upstream | the pinned commit, fetched by `port/tools/fetch-llama.ps1` |
+| overlay | every file the port changes or adds, at its real path; currently 119 files |
+| engine | `port/engine/`, built against the composed tree by `port/tools/build-engine.ps1` |
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File port/tools/fetch-llama.ps1   # pin + overlay
+powershell -NoProfile -ExecutionPolicy Bypass -File port/tools/fetch-llama.ps1 -Verify
+```
+
+`-Verify` reproduces the tree from the pin and checks it byte-for-byte against `third_party/llama.cpp`, then runs the
+marker check and a CMake configure. Verified property: the reproduction matches at 4 178 files with zero differing bytes.
+
+The overlay directory must mirror the tree exactly - no extra files, nothing missing. A README inside it would land in
+`third_party/llama.cpp` and be the one file the reproduction could not match; the per-file description lives in
+`UPSTREAM-PATCHES.md` instead.
+
+## Syncing the fork to a newer upstream
+
+The vendored tree moves by **re-pinning**, not by merging: `fetch-llama.ps1` downloads a new pin, applies the overlay and
+the gates decide whether the port still composes. The rules:
+
+1. Change the pin in `fetch-llama.ps1`, fetch, and let the overlay copy fail loudly where upstream moved code the patches
+   touch. Resolve each conflict **in the overlay**, never in `third_party/llama.cpp` - a hand edit there is lost on the
+   next fetch.
+2. A patch that upstream has since implemented is dropped from the overlay and recorded as such in
+   `UPSTREAM-PATCHES.md`; a patch that no longer applies is rewritten or, if the feature is gone, removed together with
+   its code path.
+3. Keep only **topic-relevant** patches: the trellis/ternary types, the MTP/NextN plumbing, the engine hooks, the
+   qwen4exp/GDN features and the ARM64 device tuning. Application-side work belongs to the app tree, not to this overlay.
+4. **Touch every file after a swap** - `Copy-Item` preserves timestamps, so without
+
+   ```powershell
+   (Get-ChildItem third_party\llama.cpp -Recurse -File).LastWriteTime = Get-Date
+   ```
+
+   ninja skips objects whose sources look older than the binary and links a mixed tree: it builds cleanly and crashes on
+   the first token.
+5. Rebuild `ggml-hexagon` **before** the engine; the host backend is not a dependency of the engine target.
+
+## Keeping the pin current
+
+The port follows `ggml-org/llama.cpp` on its own schedule, not on every upstream commit: the tree is verified against the
+pin, so a re-pin costs a fetch, the overlay conflicts and the full gate list. Run this to see whether it is time:
+
+```powershell
+python port/tools/check-pin.py            # what is pinned, and how far master has moved
+python port/tools/check-pin.py --offline  # just the pin, no network
+```
+
+It exits 0 when the pin is current, 1 when master is ahead (and prints the leading commits) and 2 when the lookup
+failed. A sensible cadence is once a release, or when a change the port wants lands upstream; re-pin when the commits
+touch `ggml/`, `src/llama-graph.cpp`, `src/llama-model-loader.*`, `ggml/src/ggml-vulkan/` or the trellis-adjacent type
+code, because those are what the overlay patches.
+
+## Gates that must pass
+
+| gate | command | expected |
+| --- | --- | --- |
+| overlay mirror | `python port/tools/check-marks.py` / the reproduction above | 119 files, zero differing bytes |
+| port markers | `python port/tools/check-fork-features.py` | 19/19 markers |
+| engine stdout contract | `node port/tests/serve_contract.mjs` | 10/10 |
+| encoding | `python port/tools/check-encoding.py` | 0 damaged files |
+| documents | `python port/tools/audit-docs.py` | 0 problems |
+| kernels | `build\bin\test-backend-ops.exe -o MUL_MAT -b Vulkan0` | 0 failures, and the run covers the trellis types (the 0.2.15 harness no longer matches `-p type_a=`) |
+| tokens | `--tokens 9707 --n 32` against the reference stream | identical |
+| **backend logits** | `--dump-logits FILE` on `--gpu cpu` and on Vulkan, same prompt | correlation >= 0.999 and the same argmax |
+| CPU reference | `--gpu cpu --tokens 9707 --n 12` against the Vulkan stream, on the packs that hold it | identical on 27B-Q4_0 and 35B-A3B; Gyro-S at the first token and to 0.999, longer streams are a known near-tie race |
+
+The logits row is the one that matters. It is the gate that caught the f16-accumulate cooperative matrix
+(`PERFORMANCE.md`, the *Closed routes* table, and `PERFORMANCE-LOG.md` for the run): that kernel passed a 32-token
+stream comparison on five packs and still returned a different
+distribution (correlation 0.02). A token-stream comparison is a weak oracle - it only sees near-ties it happens to hit.
+
+Two things about the token rows, both measured (2026-11-18):
+
+* **Gyro-S's CPU and Vulkan streams used to diverge at the eighth token.** With the f16-accumulate path off they agree on
+  the first token (`77`) and to 0.999 correlation; a stream over many tokens can still flip a near-tie, so quote the
+  thread count and the `STRATA_CPU_REPACK` state with any CPU reference stream, and prefer `-t 18` when comparing against
+  an older note. What the gate certifies for Gyro-S is the Vulkan reference stream, the backend oracle and `--gpu cpu`
+  byte-stability against itself.
+* **CPU token equality depends on the thread count and on the repack setting**, because both change a reduction tree / a gemv
+  order. For Gyro-S the repack-on stream diverges from the repack-off one at the eleventh token
+  (the repack notes in `PERFORMANCE.md`), and the engine chooses repack from the pack's dense byte count, so the
+  state is not always the obvious one.
+
+Any perf change also has to survive `python port/tools/bench_runs.py <exe> <pack> 3`: this machine's run-to-run spread is
+about 4% for decode and 12-16% for prefill, so a single run proves nothing - and with other work on the machine it can
+be far worse. `PERFORMANCE.md`
+*How these numbers are taken* has the discipline that came out of it.
+
+## Where the rest is written down
+
+| document | content |
+| --- | --- |
+| `UPSTREAM-PATCHES.md` | every patch, file by file, with the measurement or the bug that justifies it |
+| `ADRENO.md` | the device: what it can do, the flags this port sets because of it, and the per-op measurements |
+| `PERFORMANCE.md` | current numbers, the changes that earned them, and the routes that were measured and closed |
+| `PERFORMANCE-LOG.md` | the raw, append-only record behind it, including conclusions that were later withdrawn |
+| `features/` | hyper-connections, the gated delta net, expert placement, the NPU |
+
+## Editing discipline
+
+Every trap below has cost at least one round. They share one shape: an edit or a build that silently did not do what it
+looked like it did, followed by a measurement of the wrong binary.
+
+1. **Scripted anchors that do not match.** A hand written `old` string fails on a space or a line break, the replacement
+   does nothing, and the build measures the previous code.
+   - Prefer an edit tool with the exact text read from the file: it fails loudly instead of silently.
+   - After any scripted edit, grep for the new text. "The script printed done" is not evidence.
+2. **Edit order: `third_party` first, then the overlay.** The repository tracks `port/llama-overlay-vanilla`; the build
+   reads `third_party/llama.cpp`. Editing `third_party` and then copying the overlay back over it silently reverts the
+   edit.
+   - Edit `third_party`, copy to the overlay, build. Never the other way round.
+3. **A generator edit needs the generator rebuilt.** `vulkan-shaders-gen` is a host tool built from
+   `vulkan-shaders-gen.cpp`; deleting the `.spv` directory alone is not enough, because a stale generator keeps
+   producing the old shaders.
+   - Delete `build/ggml/src/ggml-vulkan/vulkan-shaders.spv` **and** the built `vulkan-shaders-gen` executable.
+4. **Diagnostic lines drift.** A `printf` with one specifier too many shifts every later field; a counter that is never
+   reset reads as a trend.
+   - When adding a field, count specifiers against arguments and check one value whose answer is known; reset per run.
+5. **The wrong binary.** After a failed build the previous binary stays in place, and a run then "confirms" the old
+   behaviour.
+   - Read the build output for `error:` before every measurement, and stop on the first one.
+6. **Undo by first occurrence deletes upstream code.** A scripted revert that removes the first match of a line can
+   remove a line upstream already had.
+   - Keep a pristine copy before an experiment (`git show <commit>:<path>`), diff against it after the revert, and
+   restore from that copy rather than editing back.
+
+## Two checks worth running every time
+
+Both catch a mistake that a build alone cannot see.
+
+1. **The overlay and the tree must be byte-identical.** `third_party/llama.cpp` is not tracked; the tracked truth is
+   `port/llama-overlay-vanilla/`. Editing the tree and forgetting the copy leaves a build that works *now* and a
+   repository that silently reverts on the next `fetch-llama.ps1`. Compare every overlay file against its tree
+   counterpart (a few lines of Python are enough); the expected answer is zero differing files.
+2. **Every environment switch in the docs must exist in the code, and every switch in the code that a reader may need
+   must be in the docs.** Compare `STRATA_*` names found by `getenv` in the overlay and the engine against the names in
+   `port/docs/USAGE.md`. The docs may legitimately omit developer-only switches - but a documented switch with no
+   implementation is a defect, and in this tree it has happened more than once.
+
+Both are cheap, both are text-only, and both have caught real problems in this port.
+
+
+## Crash diagnosis
+
+- `setvbuf(stderr, ..., _IONBF)` in `main`: an abort does not flush stdio, so redirected logs lose the last lines.
+- a `std::set_terminate` handler that prints `what()`: an uncaught `vk::` error otherwise ends in `abort` with no text.
+- the Windows event log names the faulting module without a debugger:
+  `Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=$t} | ? ProviderName -match 'Application Error'`.
+  `ucrtbase.dll` with `0xC0000409` means a CRT fail-fast (`abort`, `__fastfail`, terminate), not a driver fault.
+- validation layers can be forced with `VK_LOADER_LAYERS_ENABLE=VK_LAYER_KHRONOS_validation`; on a driver internal
+  failure they report nothing, which is itself informative.
+- a process that is alive with one or two threads, no new stderr line for a minute and an idle disk is usually a second
+  engine instance competing for the same GPU, not a deadlock. Check for a leftover `strata-vk` process before measuring.

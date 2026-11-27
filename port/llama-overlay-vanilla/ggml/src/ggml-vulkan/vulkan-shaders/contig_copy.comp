@@ -1,0 +1,91 @@
+#version 450
+
+#include "types.glsl"
+#include "generic_unary_head.glsl"
+
+#extension GL_EXT_control_flow_attributes : require
+
+const uint num_threads = 128;
+
+layout(local_size_x = num_threads, local_size_y = 1, local_size_z = 1) in;
+
+#ifdef CONTIG_CPY_VEC4
+// Same-type 32-bit copies: four consecutive elements per invocation, four accesses per invocation instead of one per
+// invocation over four iterations.  The host divides the grid by four (see cpy_to_contiguous), so get_idx() spans
+// ne/4 invocations and base = get_idx()*4 spans the tensor exactly; the guard covers the last partial group.
+void main() {
+    // The grid is the one this op already dispatches - one workgroup in x of num_threads, and one unit of 512
+    // elements in y - so an invocation takes four consecutive elements of its unit: y picks the unit, x picks the
+    // quarter.  get_idx() cannot be used here because it encodes the four-iteration slot layout of the scalar path.
+    const uint base = gl_GlobalInvocationID.z * 262144u + gl_GlobalInvocationID.y * num_threads * 4u + gl_GlobalInvocationID.x * 4u;
+    if (base >= p.ne) {
+        return;
+    }
+    const uint a_off = get_aoffset();
+    const uint d_off = get_doffset();
+    if (base + 4u <= p.ne) {
+        data_d[d_off + base + 0u] = data_a[a_off + base + 0u];
+        data_d[d_off + base + 1u] = data_a[a_off + base + 1u];
+        data_d[d_off + base + 2u] = data_a[a_off + base + 2u];
+        data_d[d_off + base + 3u] = data_a[a_off + base + 3u];
+    } else {
+        for (uint k = 0u; k < 4u; ++k) {
+            if (base + k >= p.ne) {
+                break;
+            }
+            data_d[d_off + base + k] = data_a[a_off + base + k];
+        }
+    }
+}
+#else
+void main() {
+    uint idx = get_idx();
+
+    // num_threads * num_iter must equal 512, to match the wg_denoms and get_idx calculation.  The four iterations step
+    // by num_threads so that a warp touches one contiguous 128-byte line per iteration; the alternative - four
+    // consecutive elements per invocation, which would allow a float4 copy - needs a grid of ne/4 invocations and so a
+    // different dispatch geometry, not a different kernel body.
+    const uint num_iter = 4;
+
+    // Both offsets are loop-invariant: they are tensor base offsets in elements, so computing them once per
+    // invocation instead of at every one of the eight access sites is free.
+    const uint a_off = get_aoffset();
+    const uint d_off = get_doffset();
+
+    // fast path for when all four iterations are in-bounds
+    if (idx + (num_iter-1)*num_threads < p.ne) {
+        [[unroll]] for (uint i = 0; i < num_iter; ++i) {
+
+#if defined(DATA_A_BF16)
+            data_d[d_off + idx] = D_TYPE(bf16_to_fp32(uint32_t(data_a[a_off + idx])));
+#elif defined(DATA_D_BF16)
+            float f = float(data_a[a_off + idx]);
+            data_d[d_off + idx] = D_TYPE(fp32_to_bf16(f));
+#elif !defined(OPTIMIZATION_ERROR_WORKAROUND)
+            data_d[d_off + idx] = D_TYPE(data_a[a_off + idx]);
+#else
+            data_d[d_off + idx] = data_a[a_off + idx];
+#endif
+            idx += num_threads;
+        }
+    } else {
+        [[unroll]] for (uint i = 0; i < num_iter; ++i) {
+            if (idx >= p.ne) {
+                continue;
+            }
+
+#if defined(DATA_A_BF16)
+            data_d[d_off + idx] = D_TYPE(bf16_to_fp32(uint32_t(data_a[a_off + idx])));
+#elif defined(DATA_D_BF16)
+            float f = float(data_a[a_off + idx]);
+            data_d[d_off + idx] = D_TYPE(fp32_to_bf16(f));
+#elif !defined(OPTIMIZATION_ERROR_WORKAROUND)
+            data_d[d_off + idx] = D_TYPE(data_a[a_off + idx]);
+#else
+            data_d[d_off + idx] = data_a[a_off + idx];
+#endif
+            idx += num_threads;
+        }
+    }
+}
+#endif

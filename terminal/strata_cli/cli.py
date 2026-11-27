@@ -323,14 +323,14 @@ def parser() -> argparse.ArgumentParser:
                               help="require the candidate run-config bytes shown in a restart recipe plan")
     bench = sp.add_parser("bench", help="explicit serving benchmark with local JSON evidence")
     bench_sp = bench.add_subparsers(dest="bench_command", required=True)
-    bench_run = bench_sp.add_parser("run", help="the standard benchmark (docs/BENCHMARK_PROTOCOL.md), or a serving suite")
+    bench_run = bench_sp.add_parser("run", help="the standard benchmark, or a serving suite")
     bench_source = bench_run.add_mutually_exclusive_group(required=True)
     bench_source.add_argument("--profile", help="saved serving profile or installed run config")
     bench_source.add_argument("--url", help="server root; remote connections require HTTPS")
     bench_run.add_argument("--suite", choices=("standard-v1", "serving-smoke", "parallel-mixed-v1", "parallel-overload-v1",
                                                "parallel-cancel-v1", "parallel-prefill-cancel-v1"),
                            default="standard-v1",
-                           help="standard-v1 (default) follows docs/BENCHMARK_PROTOCOL.md; the others are serving suites for your own comparisons")
+                           help="standard-v1 (default) is the standard benchmark protocol; the others are serving suites for your own comparisons")
     bench_run.add_argument("--concurrency", type=int, default=None,
                            help="serving suites: simultaneous requests (1..16, or 1..64 for parallel-overload-v1; default 4)")
     bench_run.add_argument("--repeat", type=int, default=None, help="serving suites: repeat measured phases (1..5; default 1)")
@@ -345,7 +345,7 @@ def parser() -> argparse.ArgumentParser:
     bench_run.add_argument("--credential-env", default="STRATA_API_KEY")
     bench_run.add_argument("--telemetry-credential-env", default=None)
     bench_run.add_argument("--output", choices=("human", "json"), default="human")
-    standard = bench_run.add_argument_group("standard suite (docs/BENCHMARK_PROTOCOL.md)")
+    standard = bench_run.add_argument_group("standard suite")
     standard.add_argument("--optional-concurrency", action="store_true",
                           help="also run the optional stage: four short requests released together, three rounds")
     standard.add_argument("--no-start", action="store_true",
@@ -751,7 +751,7 @@ def _models_move_unfinished(a: argparse.Namespace, old: Path) -> int:
 
 
 def _custom_tail(item: dict) -> str:
-    """` [Custom] 12 GB, a build of inkling-2-mini SQ-20` after a custom build's name in `strata models list` (nothing for the official installs)."""
+    """` [Custom] 12 GB, a build of qwen36 Q4_K_XL` after a custom build's name in `strata models list` (nothing for the official installs)."""
     if item.get("custom") is not True:
         return ""
     from strata_cli.launch import custom
@@ -1145,17 +1145,12 @@ def _direct_calibration(ref: str, kind: str, report_path: Path, action) -> tuple
 
 
 def _calibration(a: argparse.Namespace) -> int:
-    from serve import hy4_kind, inkling_kind
     from strata_control import calibration
     machine = a.output == "json"
     try:
         _p, _s, _r, _cfg = _source(a.profile)
     except Exception:                                        # noqa: BLE001
         _cfg = {}
-    if hy4_kind.is_hy4(_cfg):
-        return _error("Tencent Hy4-Flash needs no calibration: its speed and memory placement are set automatically by strata-hy4.", 2, machine)
-    if inkling_kind.is_inkling(_cfg):
-        return _error("Inkling-2-Mini needs no calibration: its speed and memory placement are set automatically by strata-inkling.", 2, machine)
     if (a.out and not a.measure) or (a.exclusive and not (a.measure or a.apply_result or a.rollback_result)):
         return _error("--out is only for --measure; --exclusive is only for --measure, --apply-result "
                       "or --rollback-result", 2, machine)
@@ -1354,7 +1349,7 @@ def _usable_key(value):
 
 
 def _bench_standard(a: argparse.Namespace, machine: bool) -> int:
-    """`strata bench run` for docs/BENCHMARK_PROTOCOL.md: against a running server (--url, or a profile that is already serving),
+    """`strata bench run` for the standard benchmark protocol: against a running server (--url, or a profile that is already serving),
     or by starting the profile's engine for the run and stopping it afterwards."""
     from strata_cli import bench_facts, bench_standard
     fixed = [name for name, value in (("--concurrency", a.concurrency), ("--repeat", a.repeat),

@@ -17,7 +17,7 @@ from typing import Any
 BADGE = "Custom"
 MAX_CFG_BYTES = 1024 * 1024
 KEPT_WORDS = "Only the run settings were removed; your original model files were left where they are."
-FAMILIES_LINE = "Qwen3.8-Flash-Next, Qwen3.6-35B-A3B, HY-4 Flash and Inkling-2-Mini"
+FAMILIES_LINE = "Qwen3.8-Flash-Next, Qwen3.6-35B-A3B and Ornith-1.5-35B-A3B"
 UNSUPPORTED_WORDS = (f"Strata runs compatible fine-tunes and quantizations of {FAMILIES_LINE} (local .strata or .gguf files). "
                      "For any other model type, add it as a Custom model API (llama-server) instead.")
 

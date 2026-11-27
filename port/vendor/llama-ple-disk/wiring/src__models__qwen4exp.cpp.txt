@@ -1,0 +1,301 @@
+                                                    h, ple_rows, params.path_ple));
+                }
+            }
+
+            const size_t offs = gguf_get_data_offset(ctx_ple.get()) + gguf_get_tensor_offset(ctx_ple.get(), tid);
+
+            llama_ple_disk::params dp;
+            dp.n_threads   = params.ple_io_threads;
+            dp.cache_bytes = params.ple_cache_mb > 0 ? (size_t) params.ple_cache_mb << 20 : 0;
+            dp.direct_io   = params.ple_direct_io;
+            try {
+                ple_disk = std::make_shared<llama_ple_disk>(params.path_ple, offs, pe_type, ne[0], ple_rows, dp);
+            } catch (const std::exception & e) {
+
+---
+
+                }
+            }
+
+            const size_t offs = gguf_get_data_offset(ctx_ple.get()) + gguf_get_tensor_offset(ctx_ple.get(), tid);
+
+            llama_ple_disk::params dp;
+            dp.n_threads   = params.ple_io_threads;
+            dp.cache_bytes = params.ple_cache_mb > 0 ? (size_t) params.ple_cache_mb << 20 : 0;
+            dp.direct_io   = params.ple_direct_io;
+            try {
+                ple_disk = std::make_shared<llama_ple_disk>(params.path_ple, offs, pe_type, ne[0], ple_rows, dp);
+            } catch (const std::exception & e) {
+                // no mmap fallback here: the main loader never sees the sidecar's table
+
+---
+
+            }
+
+            const size_t offs = gguf_get_data_offset(ctx_ple.get()) + gguf_get_tensor_offset(ctx_ple.get(), tid);
+
+            llama_ple_disk::params dp;
+            dp.n_threads   = params.ple_io_threads;
+            dp.cache_bytes = params.ple_cache_mb > 0 ? (size_t) params.ple_cache_mb << 20 : 0;
+            dp.direct_io   = params.ple_direct_io;
+            try {
+                ple_disk = std::make_shared<llama_ple_disk>(params.path_ple, offs, pe_type, ne[0], ple_rows, dp);
+            } catch (const std::exception & e) {
+                // no mmap fallback here: the main loader never sees the sidecar's table
+                throw std::runtime_error(format("--model-ple: cannot read the n-gram table from '%s': %s",
+
+---
+
+
+            llama_ple_disk::params dp;
+            dp.n_threads   = params.ple_io_threads;
+            dp.cache_bytes = params.ple_cache_mb > 0 ? (size_t) params.ple_cache_mb << 20 : 0;
+            dp.direct_io   = params.ple_direct_io;
+            try {
+                ple_disk = std::make_shared<llama_ple_disk>(params.path_ple, offs, pe_type, ne[0], ple_rows, dp);
+            } catch (const std::exception & e) {
+                // no mmap fallback here: the main loader never sees the sidecar's table
+                throw std::runtime_error(format("--model-ple: cannot read the n-gram table from '%s': %s",
+                                                params.path_ple, e.what()));
+            }
+            LLAMA_LOG_INFO("%s: PLE n-gram table read from sidecar '%s': %s\n",
+
+---
+
+            } catch (const std::exception & e) {
+                // no mmap fallback here: the main loader never sees the sidecar's table
+                throw std::runtime_error(format("--model-ple: cannot read the n-gram table from '%s': %s",
+                                                params.path_ple, e.what()));
+            }
+            LLAMA_LOG_INFO("%s: PLE n-gram table read from sidecar '%s': %s\n",
+                            __func__, params.path_ple, ple_disk->describe().c_str());
+
+            // register with the main loader too, in case this file also happens to carry a
+            // copy: TENSOR_NOT_REQUIRED means it's fine either way, and TENSOR_SKIP means we
+            // never touch its bytes even if it's there
+            create_tensor(tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"), { hparams.ple_head_dim, ple_rows },
+                          TENSOR_SKIP | TENSOR_NOT_REQUIRED);
+
+---
+
+            }
+
+            if (params.ple_on_disk) {
+                // Counted as created but never allocated, mapped or read: each ubatch preads its
+                // rows straight from the file. Only the joined layout has a single tensor to read
+                // from; a per-head file is already small enough to offload, so the flag is moot.
+                llama_ple_disk::params dp;
+                dp.n_threads   = params.ple_io_threads;
+                dp.cache_bytes = params.ple_cache_mb > 0 ? (size_t) params.ple_cache_mb << 20 : 0;
+                dp.direct_io   = params.ple_direct_io;
+                try {
+                    ple_disk = std::make_shared<llama_ple_disk>(ml.fnames.at(w->idx), w->offs,
+                                                                w->tensor->type, w->tensor->ne[0], ple_rows, dp);
+
+---
+
+
+            if (params.ple_on_disk) {
+                // Counted as created but never allocated, mapped or read: each ubatch preads its
+                // rows straight from the file. Only the joined layout has a single tensor to read
+                // from; a per-head file is already small enough to offload, so the flag is moot.
+                llama_ple_disk::params dp;
+                dp.n_threads   = params.ple_io_threads;
+                dp.cache_bytes = params.ple_cache_mb > 0 ? (size_t) params.ple_cache_mb << 20 : 0;
+                dp.direct_io   = params.ple_direct_io;
+                try {
+                    ple_disk = std::make_shared<llama_ple_disk>(ml.fnames.at(w->idx), w->offs,
+                                                                w->tensor->type, w->tensor->ne[0], ple_rows, dp);
+                } catch (const std::exception & e) {
+
+---
+
+            if (params.ple_on_disk) {
+                // Counted as created but never allocated, mapped or read: each ubatch preads its
+                // rows straight from the file. Only the joined layout has a single tensor to read
+                // from; a per-head file is already small enough to offload, so the flag is moot.
+                llama_ple_disk::params dp;
+                dp.n_threads   = params.ple_io_threads;
+                dp.cache_bytes = params.ple_cache_mb > 0 ? (size_t) params.ple_cache_mb << 20 : 0;
+                dp.direct_io   = params.ple_direct_io;
+                try {
+                    ple_disk = std::make_shared<llama_ple_disk>(ml.fnames.at(w->idx), w->offs,
+                                                                w->tensor->type, w->tensor->ne[0], ple_rows, dp);
+                } catch (const std::exception & e) {
+                    // the table is in the model file, so it can still be read on demand through
+
+---
+
+                // from; a per-head file is already small enough to offload, so the flag is moot.
+                llama_ple_disk::params dp;
+                dp.n_threads   = params.ple_io_threads;
+                dp.cache_bytes = params.ple_cache_mb > 0 ? (size_t) params.ple_cache_mb << 20 : 0;
+                dp.direct_io   = params.ple_direct_io;
+                try {
+                    ple_disk = std::make_shared<llama_ple_disk>(ml.fnames.at(w->idx), w->offs,
+                                                                w->tensor->type, w->tensor->ne[0], ple_rows, dp);
+                } catch (const std::exception & e) {
+                    // the table is in the model file, so it can still be read on demand through
+                    // the mapping, as --lazy-mode on does: slower than the direct reader, but the
+                    // model loads and the table still never has to be resident
+                    LLAMA_LOG_WARN("%s: --ngram-on-disk direct reader unavailable (%s); "
+
+---
+
+                    ple_disk = std::make_shared<llama_ple_disk>(ml.fnames.at(w->idx), w->offs,
+                                                                w->tensor->type, w->tensor->ne[0], ple_rows, dp);
+                } catch (const std::exception & e) {
+                    // the table is in the model file, so it can still be read on demand through
+                    // the mapping, as --lazy-mode on does: slower than the direct reader, but the
+                    // model loads and the table still never has to be resident
+                    LLAMA_LOG_WARN("%s: --ngram-on-disk direct reader unavailable (%s); "
+                                   "falling back to --lazy-mode on for the PLE n-gram table\n", __func__, e.what());
+                    ple_disk.reset();
+                }
+            }
+            if (ple_disk) {
+                LLAMA_LOG_INFO("%s: PLE n-gram table stays on disk: %s\n", __func__, ple_disk->describe().c_str());
+
+---
+
+                } catch (const std::exception & e) {
+                    // the table is in the model file, so it can still be read on demand through
+                    // the mapping, as --lazy-mode on does: slower than the direct reader, but the
+                    // model loads and the table still never has to be resident
+                    LLAMA_LOG_WARN("%s: --ngram-on-disk direct reader unavailable (%s); "
+                                   "falling back to --lazy-mode on for the PLE n-gram table\n", __func__, e.what());
+                    ple_disk.reset();
+                }
+            }
+            if (ple_disk) {
+                LLAMA_LOG_INFO("%s: PLE n-gram table stays on disk: %s\n", __func__, ple_disk->describe().c_str());
+                create_tensor(tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"), { hparams.ple_head_dim, ple_rows }, TENSOR_SKIP);
+            } else {
+
+---
+
+                    // model loads and the table still never has to be resident
+                    LLAMA_LOG_WARN("%s: --ngram-on-disk direct reader unavailable (%s); "
+                                   "falling back to --lazy-mode on for the PLE n-gram table\n", __func__, e.what());
+                    ple_disk.reset();
+                }
+            }
+            if (ple_disk) {
+                LLAMA_LOG_INFO("%s: PLE n-gram table stays on disk: %s\n", __func__, ple_disk->describe().c_str());
+                create_tensor(tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"), { hparams.ple_head_dim, ple_rows }, TENSOR_SKIP);
+            } else {
+                // --ngram-on-disk without its reader means lazy for this tensor, whatever --lazy-mode says
+                const llama_lazy_mode lazy_mode = ml.lazy.mode;
+                if (params.ple_on_disk) {
+
+---
+
+                    LLAMA_LOG_WARN("%s: --ngram-on-disk direct reader unavailable (%s); "
+                                   "falling back to --lazy-mode on for the PLE n-gram table\n", __func__, e.what());
+                    ple_disk.reset();
+                }
+            }
+            if (ple_disk) {
+                LLAMA_LOG_INFO("%s: PLE n-gram table stays on disk: %s\n", __func__, ple_disk->describe().c_str());
+                create_tensor(tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"), { hparams.ple_head_dim, ple_rows }, TENSOR_SKIP);
+            } else {
+                // --ngram-on-disk without its reader means lazy for this tensor, whatever --lazy-mode says
+                const llama_lazy_mode lazy_mode = ml.lazy.mode;
+                if (params.ple_on_disk) {
+                    ml.lazy.mode = LLAMA_LAZY_MODE_ON;
+
+---
+
+                }
+            }
+            if (ple_disk) {
+                LLAMA_LOG_INFO("%s: PLE n-gram table stays on disk: %s\n", __func__, ple_disk->describe().c_str());
+                create_tensor(tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"), { hparams.ple_head_dim, ple_rows }, TENSOR_SKIP);
+            } else {
+                // --ngram-on-disk without its reader means lazy for this tensor, whatever --lazy-mode says
+                const llama_lazy_mode lazy_mode = ml.lazy.mode;
+                if (params.ple_on_disk) {
+                    ml.lazy.mode = LLAMA_LAZY_MODE_ON;
+                }
+                per_layer_tok_embd = create_tensor(tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"),
+                                                   { hparams.ple_head_dim, ple_rows }, TENSOR_READ_LAZY);
+
+---
+
+            }
+
+            per_layer_tok_embd = create_tensor(tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"),
+                                               { hparams.ple_head_dim, ple_rows }, TENSOR_READ_LAZY);
+        } else {
+            if (params.ple_on_disk) {
+                LLAMA_LOG_INFO("%s: --ngram-on-disk ignored: this file stores the table per head, which offloads\n", __func__);
+            }
+            ple_ngram_embd.resize(hparams.ple_n_heads);
+            for (uint32_t h = 0; h < hparams.ple_n_heads; ++h) {
+                ple_ngram_embd[h] = create_tensor(tn(LLM_TENSOR_PLE_NGRAM_EMBD, "weight", h),
+                                                  { hparams.ple_head_dim, (int64_t) hparams.ple_head_vocab_sizes[h] }, 0);
+            }
+
+---
+
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    bool can_reuse(const llm_graph_params & params) override {
+        mctx = static_cast<const llama_memory_hybrid_idx_context *>(params.mctx)->get_attn();
+        const int64_t n = (int64_t) pmodel.hparams.ple_n_heads * params.ubatch.n_tokens;
+        return pmodel.ple_disk ? (embd != nullptr && embd->ne[1] == n) : (rows != nullptr && rows->ne[0] == n);
+    }
+
+    ggml_tensor * rows = nullptr;   // I32 [ple_n_heads * n_tokens]
+    ggml_tensor * embd = nullptr;   // F32 [ple_head_dim, ple_n_heads * n_tokens]: the gathered rows, when the table is on disk
+
+    std::vector<float> embd_buf;
+
+---
+
+                const uint64_t local = mixed % hp.ple_head_vocab_sizes[h_i];
+                idx[i * n_heads + h_i] = (int32_t) (split ? local : local + hp.ple_head_offsets[h_i]);
+            }
+        }
+    }
+
+    if (pmodel.ple_disk) {
+        GGML_ASSERT(embd != nullptr && rows == nullptr);
+        embd_buf.resize(idx.size() * (size_t) hp.ple_head_dim);
+        pmodel.ple_disk->gather(idx.data(), idx.size(), embd_buf.data());
+        ggml_backend_tensor_set(embd, embd_buf.data(), 0, embd_buf.size() * sizeof(float));
+        return;
+    }
+
+---
+
+        }
+    }
+
+    if (pmodel.ple_disk) {
+        GGML_ASSERT(embd != nullptr && rows == nullptr);
+        embd_buf.resize(idx.size() * (size_t) hp.ple_head_dim);
+        pmodel.ple_disk->gather(idx.data(), idx.size(), embd_buf.data());
+        ggml_backend_tensor_set(embd, embd_buf.data(), 0, embd_buf.size() * sizeof(float));
+        return;
+    }
+
+    ggml_backend_tensor_set(rows, idx.data(), 0, idx.size()*ggml_element_size(rows));
+}
+
+---
+
+    // Three ways to get there: read straight from the file when the joined table stays on disk, one
+    // gather per head when the table is split (per-head layout), or a single gather with the head axis
+    // carried in the row index when it's joined and resident -- all three give the same bytes, since
+    // concatenating in head order reproduces what a single gather over the joined table would have
+    // produced.
+    ggml_tensor * emb = nullptr;
+    if (qmodel.ple_disk) {
+        // set_input gathers the rows from the file and hands them over as F32, in the
+        // shape the get_rows below would have produced
+        ple_inp->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.ple_head_dim, n_heads * n_tokens);
+        ggml_set_input(ple_inp->embd);
+        emb = ple_inp->embd;
+        res->add_input(std::move(ple_inp));

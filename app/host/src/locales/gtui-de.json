@@ -6,7 +6,7 @@
  "cm01": "Lokale Modelldateien verwenden (.strata oder .gguf)…",
  "cm02": "Sie haben bereits ein unterstütztes Modell auf diesem Computer, etwa ein kompatibles Fine-Tuning oder eine kompatible Quantisierung? Wählen Sie den Ordner mit den Dateien oder eine der .strata- oder .gguf-Dateien. Strata prüft sie, bereitet das Modell vor und lädt es. Nichts wird kopiert oder heruntergeladen, und Ihre Dateien werden nie verändert.",
  "cm03": "Ordner mit den Modelldateien oder eine .strata- oder .gguf-Datei",
- "cm04": "Strata führt Qwen3.8-Flash-Next, Qwen3.6-35B-A3B, HY-4 Flash und Inkling-2-Mini aus, dazu kompatible Fine-Tunings und Quantisierungen davon. Laden Sie eines unter Modelle herunter oder wählen Sie seine .strata- oder .gguf-Dateien.",
+ "cm04": "Strata führt Qwen3.8-Flash-Next, Qwen3.6-35B-A3B und Ornith-1.5-35B-A3B aus, dazu kompatible Fine-Tunings und Quantisierungen davon. Laden Sie eines unter Modelle herunter oder wählen Sie seine .strata- oder .gguf-Dateien.",
  "cm05": "Prüfen Sie, ob der Ordner vollständige .strata- oder .gguf-Dateien enthält, und versuchen Sie es erneut. Die unter Details genannte Datei zeigt, was daran nicht stimmt.",
  "cm06": "Eigene Variante",
  "cm07": "Nächstliegende Variante:",

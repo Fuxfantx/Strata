@@ -575,7 +575,7 @@ def _apply(cfg: dict, *, exe_for_cards, system, allow_untested, probe, ram, scan
         return Decision(False, ["this model is not a single GGUF file set"])
     # choices the split engine does not honour: the normal layer split keeps them
     # Drafting: Auto (nothing written, or "auto") on a setup the split accepts runs the split with its MTP: measured faster to decode than the layer
-    # split with DFlash2 on both tested cards (AUTO_SPLIT_BEATS_DFLASH2, numbers in docs/SPLIT_ENGINE.md). The person's own "dflash2" (or "off", which the
+    # split with DFlash2 on both tested cards (AUTO_SPLIT_BEATS_DFLASH2). The person's own "dflash2" (or "off", which the
     # split cannot do: it needs the draft layer) keeps the layer split; "mtp" is what the split runs.
     chosen = str(cfg.get("drafting") or "auto").lower()
     # DFlash2 chosen by name runs on the split engine only when the person asked for the split engine too (--split-engine on): Auto keeps the layer split with DFlash2

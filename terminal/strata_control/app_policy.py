@@ -9,11 +9,6 @@ copy of those tables.  It now imports `app/host/server/policy-generated.mjs`, wh
 """
 
 from __future__ import annotations
-import sys
-if sys.platform == "win32":
-    # CPython 3.12's WMI helper (_wmi, behind platform.system() / uname()) takes an access violation in a worker thread when WMI refuses the
-    # account (0x80041003) and the caller has already gone (DIAG-WINHOST-0216). Without _wmi, platform uses the registry and the environment.
-    sys.modules["_wmi"] = None
 
 import json
 import sys
@@ -93,7 +88,7 @@ def vectors() -> dict:
                 switches.append(row)
     names = [{"name": n, "supported": bool(drafting.supported_model(n, None)), "named": bool(drafting.supported_model(n, None, named=True))} for n in _NAMES]
     families = [{"family": f, "supported": bool(drafting.supported_model(None, f)), "named": bool(drafting.supported_model(None, f, named=True))}
-                for f in ("qwen", "gyro", "unsloth", "swift", "coder", "nvfp4")]
+                for f in ("qwen", "gyro", "unsloth", "swift", "coder")]
     return {"cards": _CARDS, "models": _MODELS, "switches": switches, "names": names, "families": families}
 
 

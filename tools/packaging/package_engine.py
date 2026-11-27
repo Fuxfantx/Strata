@@ -90,7 +90,7 @@ def check_picture_reader(src: Path, backend: str, target: str, archs: tuple[str,
     if target.startswith("macos"):
         if reader is None and not allow_none:
             raise SystemExit("refusing to package the macOS engine without its picture reader: a Mac with this package could not read "
-                             "a picture (#3697). Build it with packaging/build_vision_mac.sh and copy strata-vision beside strata "
+                             "a picture (#3697). Build it with packaging/build_vision_windows.bat and copy strata-vision beside strata "
                              "(or give --no-picture-reader to ship a text-only package on purpose).")
         if reader is None:
             notes.append("no picture reader in this macOS package: pictures are off for it")
@@ -113,7 +113,7 @@ def check_picture_reader(src: Path, backend: str, target: str, archs: tuple[str,
                 else "the reader has no code for " + ", ".join(f"sm_{n}" for n in missing))
         raise SystemExit(f"refusing to package the {variant or backend} engine with this picture reader: {what}. A reader reused from an "
                          "older build stops with 'device kernel image is invalid' on a card it was not built for (#3669). Build it for the "
-                         "package's architectures (packaging/build_vision_windows.bat, packaging/build_cuda_linux.sh) and record them as "
+                         "package's architectures (packaging/build_vision_windows.bat) and record them as "
                          "vision_archs in BUILD.json (or give --allow-stale-vision).")
     if missing:
         notes.append("picture reader NOT built for " + ", ".join(f"sm_{n}" for n in missing) + " (allowed by --allow-stale-vision)")
@@ -177,16 +177,11 @@ def build(src: Path, backend: str, version: str, target: str, out: Path, *, entr
     if backend != "cpu" and not archs:
         raise SystemExit(f"a {backend} package needs at least one --arch (sm_86, gfx1201, ...)")
     if backend == "cuda" and variant == "cuda12" and not any(a in ("sm_60", "sm_61", "sm_70") for a in archs):
-        # #3503: the cuda12 package is what the feed and docs/DOCKER.md offer to GTX 10 / P100 / V100; one built for
+ # #3503: the cuda12 package is what the feed and offer to GTX 10 / P100 / V100; one built for
         # sm_75 and up starts a restart loop on those cards ("this PC's GPU is sm_60")
         raise SystemExit("refusing to package the cuda12 engine without sm_60, sm_61 or sm_70: it is the Pascal and Volta build "
-                         "(CUDA 12.9, -DSTRATA_EXPERIMENTAL_SM60=ON, --arch sm_60 --arch sm_61 --arch sm_70 ...; see packaging/build_cuda_linux.sh)")
-    if backend == "hip" and shape not in shape_engine.CUSTOM_SHAPES:         # custom shape runners (Hy4-Flash, Inkling-2-Mini) carry their own kernels (no hipBLASLt)
-        from strata_control import hipblaslt_tuning
-        problems = hipblaslt_tuning.check_stage(src, archs)
-        if problems:
-            raise SystemExit("refusing to package the AMD engine:\n  " + "\n  ".join(problems))
-    entrypoint = entry or (shape_engine.exe_name(shape, target=target) if shape in shape_engine.CUSTOM_SHAPES else ("strata.exe" if target.startswith("windows") else "strata"))
+                         "(CUDA 12.9, -DSTRATA_EXPERIMENTAL_SM60=ON, --arch sm_60 --arch sm_61 --arch sm_70 ...)")
+    entrypoint = entry or ("strata.exe" if target.startswith("windows") else "strata")
     if not (src / entrypoint).is_file():
         raise SystemExit(f"{src / entrypoint} does not exist")
     if check_reader and shape not in shape_engine.CUSTOM_SHAPES:   # custom shape runners (Hy4-Flash, Inkling-2-Mini) read pictures inside their runner (no strata-vision)

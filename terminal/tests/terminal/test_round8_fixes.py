@@ -341,9 +341,9 @@ class IdentityAndAdoption(unittest.TestCase):
                                        pack_name="gyro-gyro-s")
             self.assertEqual(problems, [], problems)
             self.assertEqual(cfg["args"][cfg["args"].index("--ple-gguf") + 1], cfg["args"][cfg["args"].index("--native") + 1])
-            _, refused = adopt.plan(family="nvfp4", model="NVFP4", model_dir=model_dir, data_dir=data, src=Path("."), context=8192, kv=None,
+            _, refused = adopt.plan(family="qwen36", model="Q4_K_XL", model_dir=model_dir, data_dir=data, src=Path("."), context=8192, kv=None,
                                     model_name="x", family_def={}, log=h.base / "x.log", backend=None)
-            self.assertTrue(refused[0].endswith("not for nvfp4"))                 # the caller adds the one full stop
+            self.assertTrue(refused[0].endswith("not for qwen36"))                 # the caller adds the one full stop
 
 
 class UpdateCheckNamesTheChoice(unittest.TestCase):

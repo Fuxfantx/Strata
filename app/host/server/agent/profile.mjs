@@ -6,7 +6,7 @@
  * per saved API connection, so that each chat can pick its own model. This module writes the same two
  * Cordis entries (`agent-default-model`, `llm-pi-ai`) for the current set.
  *
- * Rules carried over from the integration notes (history/docs/work/IMPLEMENTATION_STATUS.md section 1.8):
+ * Rules carried over from the integration notes (integration notes, section 1.8):
  *   - `llm-pi-ai` config is `{ providers: { "<route>": {...} } }`; a route key at the top level is
  *     silently ignored.
  *   - the output budget must fit the whole request, so `maxTokens` is derived from the real context.
@@ -229,10 +229,6 @@ export function compactionThreshold(context, outputBudget, env = process.env) {
  * chat_template_kwargs.enable_thinking false; the rest send it true plus reasoning_effort (the server maps high and max to its top level).
  */
 export const LOCAL_EFFORTS = Object.freeze({ off: null, low: 'low', medium: 'medium', high: 'high', max: 'high' });
-/** Thinking levels for Tencent Hy4-Flash: Off, High (default), Max (passes max through to strata-hy4's max reasoning budget). */
-export const HY4_LOCAL_EFFORTS = Object.freeze({ off: null, low: 'high', medium: 'high', high: 'high', max: 'max' });
-/** Inkling-2-Mini thinks (0.2.21). The server's levels: none/off 0, minimal 0.1, low 0.2, medium 0.7, high 0.9, xhigh and max 0.99. The menu's words go through as they are (Off sends enable_thinking false and no effort), Max as "max" (the other local models' server maps Max to high). */
-export const INKLING_LOCAL_EFFORTS = Object.freeze({ off: null, low: 'low', medium: 'medium', high: 'high', max: 'max' });
 /** The menu's words to the Harness's level names. */
 export const EFFORT_LEVEL = Object.freeze({ off: 'off', minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', max: 'max' });
 /**
@@ -256,7 +252,6 @@ export function connectionReasoningFormat(conn) {
 export function connectionReasoningEfforts(conn, model) {
   const format = connectionReasoningFormat(conn);
   if (model.reasoning === false || (model.reasoning !== true && conn.reasoningFormat !== format)) return null;
-  if (/^hy4-flash/i.test(String(model?.id ?? '')) && (format === 'strata' || format === 'effort')) return HY4_LOCAL_EFFORTS;
   switch (format) {
     case 'strata': return LOCAL_EFFORTS;
     case 'openrouter': return OPENROUTER_EFFORTS;
@@ -341,8 +336,6 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
     // does not authenticate gets a fixed placeholder; one that does gets its real key, by reference.
     env[keyEnv] = inst.key || 'strata-local';
     const context = inst.context ?? 32768;
-    const isInklingModel = inst.arch === 'inkling2_loop' || /^inkling-2-mini/i.test(String(inst.modelId ?? ''));
-    const isHy4Model = inst.arch === 'hy4flash' || /^hy4-flash/i.test(String(inst.modelId ?? ''));
     providers[route] = {
       displayName: inst.label ? `Strata (local) ${inst.label}` : 'Strata (local)',
       api: 'openai-completions',
@@ -354,13 +347,12 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
       streamIdleTimeoutMs: 60 * 60_000,
       // The Strata server reads the thinking level from `chat_template_kwargs` (enable_thinking, reasoning_effort) or from a top-level
       // reasoning_effort; a top-level `enable_thinking` (pi-ai's `qwen` format) is ignored, so the model went on thinking with the menu on Off.
-      // Inkling-2-Mini thinks like the others (0.2.21): its thinking comes back as reasoning_content, and Off sends none.
       compat: THINKING_COMPAT,
       models: [{
         id: inst.modelId, name: inst.label || inst.modelId, contextWindow: context, maxTokens: localOutputBudget(context),
         input: inst.vision ? ['text', 'image'] : ['text'],
         reasoning: true,
-        reasoningEfforts: isHy4Model ? HY4_LOCAL_EFFORTS : isInklingModel ? INKLING_LOCAL_EFFORTS : LOCAL_EFFORTS,
+        reasoningEfforts: LOCAL_EFFORTS,
       }],
     };
     compaction.push({ provider: route, model: inst.modelId, headroomTokens: compactionHeadroom(context, localOutputBudget(context)), thresholdRatio: thresholdRatio() });

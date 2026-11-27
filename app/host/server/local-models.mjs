@@ -4,13 +4,17 @@ import { createHash } from 'node:crypto';
 import { basename, dirname, extname, isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { readGGUF } from './gguf.mjs';
-const ARCHITECTURES=new Set(['qwen2','qwen2moe','qwen3','qwen3moe','qwen3next','qwen35','qwen35moe','qwen4exp','llama','gemma','gemma2','gemma3','phi3','inkling2','inkling2_loop','hy4','hy4flash']);
+const ARCHITECTURES=new Set(['qwen2','qwen2moe','qwen3','qwen3moe','qwen3next','qwen35','qwen35moe','qwen4exp','llama','gemma','gemma2','gemma3','phi3','hy_v4','hy_v4_flash']);
 /** Architectures only Strata's own engines run (the other names above are also read by the llama-server route): their GGUF metadata keys can differ, so a missing size key falls back to a plain default instead of refusing a file the engine reads. */
-const ENGINE_ARCHITECTURES=new Set(['qwen4exp','qwen35moe','inkling2','inkling2_loop','hy4','hy4flash']);
+const ENGINE_ARCHITECTURES=new Set(['qwen4exp','qwen35moe']);
 const STRATA_MAGIC=Buffer.from([0x53,0x54,0x52,0x41,0x54,0x41,0x00,0x01]);
 export const STRATA_MIN_BYTES=32;
 /** A name the person sees: printable characters only, no path separators, at most 160 characters. */
 export const cleanLabel=value=>String(value??'').replace(/[\x00-\x1f\x7f\\/]/g,' ').replace(/\s+/g,' ').trim().slice(0,160);
+// hy_v4 and its flash variant are what this engine implements for the Hy4 family; a pack in that family is one backbone
+// file plus a companion that holds the Engram tables, and the companion declares no shard index because it is not a
+// tensor shard.
+const COMPANION_ARCHS=new Set(['hy_v4','hy_v4_flash']);
 const QUANTS={0:'F32',1:'F16',2:'Q4_0',3:'Q4_1',7:'Q8_0',8:'Q5_0',9:'Q5_1',10:'Q2_K',11:'Q3_K_S',12:'Q3_K_M',13:'Q3_K_L',14:'Q4_K_S',15:'Q4_K_M',16:'Q5_K_S',17:'Q5_K_M',18:'Q6_K',19:'IQ2_XXS',20:'IQ2_XS',21:'Q2_K_S',22:'IQ3_XS',23:'IQ3_XXS',24:'IQ1_S',25:'IQ4_NL',26:'IQ3_S',27:'IQ3_M',28:'IQ2_S',29:'IQ2_M',30:'IQ4_XS',31:'IQ1_M',32:'BF16'};
 const clean=value=>String(value??'').replace(/[\x00-\x1f\x7f]/g,' ').trim().slice(0,160);
 function fullPath(input){if(typeof input!=='string'||!input.trim()||input.includes('\0'))throw new Error('Choose a model file or enter its full path.');const path=input.trim().replace(/^~(?=$|[\\/])/,homedir());if(!isAbsolute(path))throw new Error('Enter a full path.');try{return realpathSync(path);}catch{throw new Error('This file or folder is unavailable. Check its location and permissions.');}}
@@ -26,8 +30,13 @@ export function inspectLocalModel(input){
  if(!statSync(file).isFile())throw new Error('Select the model’s .gguf file, rather than its folder.');
  accessSync(file,constants.R_OK);
  let selected=readGGUF(file);const split=basename(file).match(/^(.*)-(\d{5})-of-(\d{5})\.gguf$/i);
- const declared=selected.metadata['split.count']??1;
- if(declared>1||split){
+ // A companion-architecture pack names its files like shards but is not one: the backbone is the whole model and the
+ // second file carries extra tables the engine opens itself, so the shard logic is skipped and the file stays as chosen.
+ // A pack can also mark a file as a companion with its own key, which is how the engine's compatibility packs are
+ // written; both marks mean the same thing here.
+ const companion=COMPANION_ARCHS.has(selected.metadata['general.architecture'])||selected.metadata['strata.companion']===true;
+ const declared=companion?1:(selected.metadata['split.count']??1);
+ if(!companion&&(declared>1||split)){
   if(!split||Number(split[3])!==declared)throw new Error('Split GGUF filenames must include 00001-of-000NN and match their metadata.');
   file=join(dirname(file),`${split[1]}-00001-of-${split[3]}.gguf`);
   try{selected=readGGUF(file);}catch{throw new Error('The first shard is missing or invalid. Keep all model shards in the same folder.');}
@@ -37,7 +46,17 @@ export function inspectLocalModel(input){
  if(m['general.type']&&m['general.type']!=='model')throw new Error('This is an adapter or auxiliary file. Choose the full model GGUF.');
  if(!m['tokenizer.ggml.model']||!m['tokenizer.ggml.tokens']?.count)throw new Error('This GGUF does not include its tokenizer. Choose the full model, not an adapter. A picture reader (mmproj) goes next to its model, not in its place.');
  const integer=(key,min,max,engineDefault)=>{const value=m[key];if(value===undefined&&engineDefault!==undefined&&ENGINE_ARCHITECTURES.has(arch))return engineDefault;if(!Number.isInteger(value)||value<min||value>max)throw new Error(`Missing or invalid ${key} metadata. This model cannot be configured safely.`);return value;};
- const context=integer(`${arch}.context_length`,1024,100_000_000,32768),layers=integer(`${arch}.block_count`,1,4096,1),embedding=integer(`${arch}.embedding_length`,1,1_000_000,1024),heads=integer(`${arch}.attention.head_count`,1,8192,8);
+ // A pack may declare a per-block head count as an array - several families mix block widths - so the value used for
+ // the derived key and value lengths is the largest of them; one integer stays the plain case.
+ const integerOrArray=(key,min,max,engineDefault)=>{const value=m[key];
+  if(value===undefined&&engineDefault!==undefined&&ENGINE_ARCHITECTURES.has(arch))return engineDefault;
+  // The reader summarises a long array as its count, and a per-block head count is one of those; the lengths that
+  // depend on it come from the pack's explicit key and value lengths in that case.
+  if(value&&typeof value==='object'&&!Array.isArray(value)&&Number.isInteger(value.count)&&value.count>=1)return 1;
+  const list=Array.isArray(value)?value:[value];
+  if(!list.length||!list.every(n=>Number.isInteger(n)&&n>=min&&n<=max))throw new Error(`Missing or invalid ${key} metadata. This model cannot be configured safely.`);
+  return Math.max(...list);};
+ const context=integer(`${arch}.context_length`,1024,100_000_000,32768),layers=integer(`${arch}.block_count`,1,4096,1),embedding=integer(`${arch}.embedding_length`,1,1_000_000,1024),heads=integerOrArray(`${arch}.attention.head_count`,1,8192,8);
  const kvHeads=m[`${arch}.attention.head_count_kv`]??heads,keyLength=m[`${arch}.attention.key_length`]??embedding/heads,valueLength=m[`${arch}.attention.value_length`]??keyLength,experts=m[`${arch}.expert_count`]??0;
  if(![kvHeads,keyLength,valueLength].every(n=>Number.isInteger(n)&&n>=1&&n<=1_000_000)||!Number.isInteger(experts)||experts<0||experts>100_000)throw new Error('This model has invalid attention or expert metadata.');
  const count=m['split.count']??1;if(!Number.isInteger(count)||count<1||count>256)throw new Error('This split model has an unsupported number of shards.');

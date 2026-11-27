@@ -1093,7 +1093,7 @@ def hip_family(arch: str) -> str:
 #: that has none: a family in this table gets the plain "no ready-made engine" line instead of "Ask for the X build".
 NO_PACKAGE_HIP: dict[str, str] = {}
 NO_PACKAGE_SENTENCE = ("This release has no ready-made Strata engine for the AMD {0} series. Strata can only run on it with an engine built for "
-                       "that card (docs/AMD_HIP.md, \"RDNA2\").")
+                       "that card (\"RDNA2\").")
 
 
 def no_package_note(archs) -> str | None:

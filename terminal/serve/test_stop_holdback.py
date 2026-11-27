@@ -23,7 +23,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 import strata_tokenizer as ST  # noqa: E402
-from serve import frontend, server  # noqa: E402
 from serve.frontend import ChatTemplate  # noqa: E402
 from serve.server import ByteTokenizer, Detokenizer, Service, StopMatcher, end_token_ids, serve  # noqa: E402
 from serve.server import MockEngine  # noqa: E402
@@ -212,7 +211,6 @@ class Routes(Fixture):
         httpd = serve(svc, port=0)
         self.addCleanup(httpd.server_close)
         self.addCleanup(httpd.shutdown)
-        self.addCleanup(frontend.use_family, None)
         self.base = self.bases[named] = f"http://127.0.0.1:{httpd.server_address[1]}"
         return engine
 

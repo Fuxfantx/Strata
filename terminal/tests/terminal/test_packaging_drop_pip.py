@@ -99,21 +99,11 @@ class AppInstallModeNeverRunsPip(unittest.TestCase):
         sub.assert_not_called()
         popen.assert_not_called()
 
-    def test_pip_install_and_the_cuda_wheels_do_not_reach_pip(self):
+    def test_pip_install_does_not_reach_pip(self):
         with mock.patch.object(setup, "CONTROL", True), mock.patch.object(setup, "control_missing_packages", return_value=[]), \
                 mock.patch.object(setup, "ok"), mock.patch.object(setup, "run") as run:
             setup.pip_install(["definitely-not-installed==1.0"], "a test package")
-            setup.pip_cuda_libs(13)
-            setup.pip_cuda_libs(12)
         run.assert_not_called()
-
-    def test_the_fp4_conversion_stops_before_pip(self):
-        with mock.patch.object(setup, "CONTROL", True), mock.patch.object(setup, "NVFP4_LOCAL_MODULES", ("definitely_not_a_module_5303",)), \
-                mock.patch.object(setup, "fail", side_effect=SystemExit(1)) as fail, mock.patch.object(setup, "run") as run:
-            with self.assertRaises(SystemExit):
-                setup.ensure_nvfp4_local_packages()
-        run.assert_not_called()
-        self.assertIn("app does not include", fail.call_args[0][0])
 
 
 if __name__ == "__main__":

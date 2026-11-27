@@ -3,8 +3,7 @@ import { tr } from '../lib/i18n';
 import { Icon } from './ui';
 import { FloatingMenu } from './FloatingMenu';
 import { cx } from '../lib/format';
-import { versionNote, orderInklingSizes, type CatalogVersion } from '../lib/native-catalog';
-import { nvfp4Version } from '../lib/native-names';
+import type { CatalogVersion } from '../lib/native-catalog';
 import { fitOn, recommendedVersions, versionFit, versionGroups, type CacheChoice, type FitHardware, type PcPick } from '../lib/native-fit';
 
 /** The name a version goes by in the list: the quantization, with the maker only where the quantization alone would be ambiguous. */
@@ -13,16 +12,14 @@ export function versionName(v: CatalogVersion): string {
   switch (v.sourceFamily) {
     case 'swift': return `Swift ${v.model}`;
     case 'unsloth': return `Unsloth ${v.model}`;
-    case 'nvfp4': return tr(nvfp4Version(v.model)?.name ?? v.model);
     case 'coder': return `Coder ${v.model}`;
-    case 'inkling-2-mini': return /^UD-/i.test(v.model) ? `Unsloth ${v.model}` : /^GSQ-RCO-/i.test(v.model) ? `GSQ-RCO ${v.model.replace(/^GSQ-RCO-/i, '')}` : v.model;
     default: return v.model;
   }
 }
 
 /** Who made a version (Details only): the family name of the quantization, a proper name in every language. */
-const MAKERS: Record<string, string> = { qwen: 'GSQ-RCO', coder: 'GSQ-RCO', swift: 'Swift', unsloth: 'Unsloth', gyro: 'Gyro', nvfp4: 'NVFP4' };
-const makerOf = (v: CatalogVersion): string | undefined => v.custom ? 'Local files' : (v.sourceFamily === 'inkling-2-mini' ? (/^UD-/i.test(v.model) ? 'Unsloth GGUF' : /^GSQ-RCO-/i.test(v.model) ? 'GSQ-RCO GGUF' : 'Strata') : MAKERS[v.sourceFamily]);
+const MAKERS: Record<string, string> = { qwen: 'GSQ-RCO', coder: 'GSQ-RCO', swift: 'Swift', unsloth: 'Unsloth', gyro: 'Gyro' };
+const makerOf = (v: CatalogVersion): string | undefined => v.custom ? 'Local files' : MAKERS[v.sourceFamily];
 
 const gb = (n: number) => `${Number.isInteger(n) ? n : n.toFixed(1)} GB`;
 const whole = (n: number) => `${Math.round(n)} GB`;
@@ -60,22 +57,10 @@ export function VersionPicker({ versions, selectedId, hardware, onSelect, onOwnG
   useEffect(() => setDetails(detailsOpen), [detailsOpen]);
   const selected = versions.find(v => v.id === selectedId);
   // Where the recommended ones are shown outside the menu, the menu holds only the others.
-  // For Inkling-2-Mini, keep the primary native .strata builds (SQ-20/SQ-15/SQ-10, hardware-recommended first) at the top,
-  // with the direct-download Unsloth GGUF quants cleanly selectable under More versions.
   const rows = recommendedVersions(versions, pick);
-  const inklingNative = versions.some(v => v.sourceFamily === 'inkling-2-mini' && !/^UD-/i.test(v.model))
-    ? versions
-        .filter(v => v.sourceFamily === 'inkling-2-mini' && !/^UD-/i.test(v.model))
-        .sort((a, b) => Number(!!b.inkling?.recommended) - Number(!!a.inkling?.recommended))
-    : [];
   const apart = new Set(showRecommended ? [] : rows.map(x => x.v.id));
-  const recommendedIds = rows.length ? rows.map(x => x.v.id) : inklingNative.map(v => v.id);
-  // Inkling-2-Mini: one list in the owner's order (Strata packs, GSQ-RCO IQ3_S, Unsloth UD-Q4_K_XL; a quant that is no longer offered only while installed), the pick for this PC first inside the Strata packs.
-  const inklingList = versions.length > 0 && versions.every(v => v.sourceFamily === 'inkling-2-mini')
-    ? orderInklingSizes(versions.filter(v => !apart.has(v.id)).map(v => ({ ...v, installed: v.installed || !!downloaded?.has(v.id) })))
-        .sort((a, b) => Number(/^SQ-/i.test(b.model) && !!b.inkling?.recommended) - Number(/^SQ-/i.test(a.model) && !!a.inkling?.recommended))
-    : null;
-  const { top, more } = inklingList ? { top: inklingList as CatalogVersion[], more: [] as CatalogVersion[] } : versionGroups(versions, apart, downloaded, recommendedIds);
+  const recommendedIds = rows.map(x => x.v.id);
+  const { top, more } = versionGroups(versions, apart, downloaded, recommendedIds);
   const shown = selected && !apart.has(selected.id) ? selected : undefined;
   // The folded part opens by itself when it holds the chosen version or when there is nothing above it.
   const [moreOpen, setMoreOpen] = useState(false);
@@ -90,15 +75,15 @@ export function VersionPicker({ versions, selectedId, hardware, onSelect, onOwnG
     const on = v.id === selectedId, have = !!downloaded?.has(v.id) && !v.custom;       // a custom build has its own "Custom" tag instead of "Downloaded": its files are the person's own
     const state = versionFit(v, hardware, cache);
     const technical = [makerOf(v), need(v, true), v.credit ? tr(v.credit) : ''].filter(Boolean).join(' · ');
-    const note = versionNote(v.model);
     return <button key={v.id} role="menuitemradio" aria-checked={on} className={cx('version-row', on && 'is-on')} onClick={() => { onSelect(v.id); setOpen(false); }}>
       <span className="version-row__check">{tr(on ? <Icon name="check" size={14}/> : null)}</span>
       <span className="version-row__body">
         <span className="version-row__title"><strong>{versionName(v)}</strong>{tr(have || v.offered === false || v.custom ? <span className="version-row__tags">{tr(v.custom ? <span className="version-tag version-tag--custom">{tr("Custom")}</span> : null)}{tr(have ? <span className="version-tag version-tag--have">{tr("Downloaded")}</span> : null)}{tr(v.offered === false ? <span className="version-tag">{tr("No longer offered")}</span> : null)}{tr(have && v.update_available ? <span className="version-tag">{tr("Update available")}</span> : null)}</span> : null)}</span>
         {tr(state === 'ssd' ? <span className="version-row__fit" data-fit={state}>{tr('may run slower')}</span> : null)}
-        {tr(details ? <span className="version-row__tech">{technical}{tr(note ? <><br/>{note}</> : null)}</span> : null)}
+        {tr(details ? <span className="version-row__tech">{technical}</span> : null)}
       </span>
-      <span className="version-row__size">{have || v.custom ? gb(v.download_gb) : tr("{0} download", [gb(v.download_gb)])}</span>
+      {/* an imported pack has nothing of ours to download, so it has no download size to state */}
+      {!v.import_only ? <span className="version-row__size">{have || v.custom ? gb(v.download_gb) : tr("{0} download", [gb(v.download_gb)])}</span> : null}
     </button>;
   };
   // The open menu opens on the chosen version, not at the top of a long list.

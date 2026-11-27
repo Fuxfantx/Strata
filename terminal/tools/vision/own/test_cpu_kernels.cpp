@@ -272,7 +272,7 @@ static void test_team() {
     }
 }
 
-// the CPU tower's rounding default: none for every weight type (BF16 included since 11-14: code4217.png token 47 0.627 -> 1.000 against float32);
+// the CPU tower's rounding default: none for every weight type (BF16 included since 11-14: token 47 0.627 -> 1.000 against float32);
 // STRATA_VIT_REF_ROUND=1 rounds to the weight's 16-bit type, float32 / Q8_0-expanded never round
 static void test_round_choice() {
     struct Case { int kind; const char* env; int want; };

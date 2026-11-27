@@ -5,233 +5,164 @@
   </picture>
 </p>
 
-<h3 align="center">Run powerful AI on your own computer.</h3>
-<p align="center">Chat, code and work with images, locally.</p>
+<h3 align="center">Strata on Windows on ARM.</h3>
+<p align="center">A Vulkan engine for Snapdragon X2 and Adreno X2, correctness first.</p>
 
 <p align="center">
-  <a href="#models">Models</a> · <a href="#install"><b>Install</b></a> ·
-  <a href="#hardware">Hardware</a> · <a href="#tools">Tools</a> ·
-  <a href="#help">Help</a> · <a href="#support-strata">Support</a>
+  <a href="#what-this-branch-is">What it is</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#measured-on-this-machine">Measured</a> ·
+  <a href="#status">Status</a> ·
+  <a href="#docs">Docs</a> ·
+  <a href="#gates">Gates</a>
 </p>
 
-<p align="center">
-  <a href="https://github.com/Niko1221/Strata/releases/latest"><img src="https://img.shields.io/github/v/release/Niko1221/Strata?label=download&color=0ab887" alt="Download Strata"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Niko1221/Strata" alt="MIT license"></a>
-  <a href="https://github.com/sponsors/Niko1221"><img src="https://img.shields.io/badge/Sponsor-EA4AAA?logo=githubsponsors&logoColor=fff" alt="Sponsor Strata on GitHub Sponsors"></a>
-  <a href="https://buymeacoffee.com/strataengine"><img src="https://img.shields.io/badge/Buy_me_a_coffee-FFDD00?logo=buymeacoffee&logoColor=000" alt="Support Strata on Buy Me a Coffee"></a>
-</p>
+<p align="center"><sub><b>English</b> · <a href="README.zh-CN.md">简体中文</a></sub></p>
 
-<p align="center"><sub><b>English</b> · <a href="docs/lang/README.zh-CN.md">简体中文</a> · <a href="docs/lang/README.ja.md">日本語</a> · <a href="docs/lang/README.de.md">Deutsch</a> · <a href="docs/lang/README.fr.md">Français</a> · <a href="docs/lang/README.es.md">Español</a> · <a href="docs/lang/README.pt-BR.md">Português</a> · <a href="docs/lang/README.pl.md">Polski</a></sub></p>
+**This is the `windows-arm64-vulkan` branch of [Strata](https://github.com/Niko1221/Strata).**
+Upstream's engine is a hand-written CUDA / HIP / SYCL kernel set, and none of it runs on an Adreno GPU. This branch
+therefore carries one addition: **`strata-vk`**, a Vulkan engine component that speaks Strata's `--serve` protocol,
+plus the overlay that teaches the vendored `llama.cpp` the model families and the low-bit types these packs use.
+The front end around it (the desktop app, the terminal, `setup.py`, the Python server) is upstream's and drives this
+engine without changes.
 
-**Free, open source, and yours to run.** Use Strata on your desktop or with your favorite coding tools. No account needed.
+Everything specific to this branch lives in `port/`. The port was developed and measured on one machine, a Snapdragon
+X2 Elite Extreme laptop; treat its numbers as that machine's, not as a hardware requirement.
 
-## Models
+## What this branch is
 
-We recommend **ISTA-DASLab first**, then **Unsloth** and other providers, where a compatible model fits.
-
-<details>
-<summary><img src="docs/media/models/qwen.svg" width="22" alt="" align="middle"> &nbsp;<b>Qwen3.8-Flash-Next</b></summary>
-
-| Provider | Choices |
-| --- | --- |
-| **ISTA-DASLab · recommended** | Q2\_0, IQ2\_XS, IQ3\_XXS, IQ3\_S. [Coder: IQ1\_M](docs/MODELS.md#coder) for coding. |
-| **Unsloth** | UD-IQ4\_XS, UD-Q4\_K\_XL, UD-Q5\_K\_XL, UD-Q6\_K\_XL, Q8\_0 |
-| **Gyro · agentionai** | [Gyro-S, Gyro-M](https://huggingface.co/agentionai/Qwen3.8-Flash-Next-Gyro-GGUF). Lower memory use but slower. |
-| **Other options** | [Swift 1.5](docs/MODELS.md#swift-15), [NVFP4](docs/NVFP4.md), [OrcaRouter](docs/ORCA.md) |
-
-[Compare sizes, memory needs and compatibility](docs/MODELS.md).
-
-</details>
-
-<details>
-<summary><img src="docs/media/models/hunyuan.svg" width="22" alt="" align="middle"> &nbsp;<b>Tencent Hy4-Flash</b></summary>
-
-| Pack | Your RAM | Graphics card |
+| Part | Where | What it does |
 | --- | --- | --- |
-| **SQ-64** | 64 GiB | 8, 12 or 16 GiB |
-| **SQ-96** | 96 GiB | 8 or 12 GiB |
-| **SQ-128** | 128 GiB | 8 or 12 GiB |
+| The engine | `port/engine/` | `strata-vk`: loading and placement, prefix reuse, sampling, the token loop, the `--serve` line protocol, `--parallel` request slots |
+| The overlay | `port/llama-overlay-vanilla/` | the tracked diff against vanilla `llama.cpp` at the pinned commit: model families (`qwen35`, `qwen35moe`, `qwen4exp`, trellis packs), low-bit types and their Vulkan kernels, the MTP/NextN graft, the loader fallbacks |
+| CPU and GPU in one build | same build | the Vulkan backend and the CPU backend (with the repack kernels) are both in `strata-vk`, so either can be selected with `--gpu`, and `test-backend-ops` can compare them |
+| The picture encoder | `port/engine/strata-vision.cpp` | `strata-vision`: llama.cpp's mtmd on an mmproj file, speaking the front end's `ENC <image> <out>` line and writing the `.sve` record the engine reads; CPU or Vulkan, chosen with `--gpu` |
+| Tools | `port/tools/` | fetch and build scripts, the measurement harnesses, the gates (`check-encoding.py`, `audit-docs.py`, `check-pin.py`) |
+| Docs | `port/docs/` | [index](port/docs/README.md): usage, performance, maintainer notes, shader conventions, upstream patches, device facts |
 
-The number in the name is the RAM the pack is made for.
-
-[Hy4-Flash packs on Hugging Face](https://huggingface.co/strata-engine/Hy4-Flash-Strata)
-
-</details>
-
-<details>
-<summary><img src="docs/media/models/qwen.svg" width="22" alt="" align="middle"> &nbsp;<b>Qwen3.6-35B-A3B</b></summary>
-
-**Unsloth:** UD-Q4_K_XL, UD-Q6_K_XL, Q8_0. These are the currently documented packs for this model.
-
-[Model guide and compatibility](docs/QWEN36.md).
-
-</details>
-
-<details>
-<summary><img src="docs/media/models/qwen.svg" width="22" alt="" align="middle"> &nbsp;<b>Ornith-1.5-35B-A3B</b></summary>
-
-**Ornith AI (MIT):** Q4_K_M, Q5_K_M, Q6_K, Q8_0. The same architecture and engine path as Qwen3.6-35B-A3B. Catalog entry from eSPiYa's patch.
-
-[Sizes and setup](docs/MODELS.md#ornith-15-35b-a3b).
-
-</details>
-
-<details>
-<summary><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/models/thinking-machines-white.png"><img src="docs/media/models/thinking-machines.png" height="22" alt="Thinking Machines" align="middle"></picture> &nbsp;<b>Inkling 2 Mini</b></summary>
-
-| Provider | Choices |
-| --- | --- |
-| **Strata** | SQ-20 (19.37 GB), SQ-15 (14.35 GB), SQ-10 (10.47 GB) |
-| **GSQ-RCO** | IQ3\_S (11.43 GB) |
-| **Unsloth** | UD-Q4\_K\_XL (17.63 GB) |
-
-SQ-20 is made for a 24 GiB graphics card, SQ-15 for 16 GiB and SQ-10 for 12 GiB. A 4 GiB card is enough to start.
-
-[Strata packs on Hugging Face](https://huggingface.co/strata-engine/Inkling-2-Mini-Strata) · [GSQ-RCO GGUF file](https://huggingface.co/ISTA-DASLab/Inkling-2-Mini-GSQ-RCO-GGUF) · [Unsloth GGUF files](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF)
-
-</details>
-
-<a id="the-other-sizes"></a>
-
-Not sure what fits? [Choose a model for your computer](docs/MODELS.md#pick-by-memory).
-
-## Install
-
-<a id="option-a-the-strata-app"></a>
-
-### Desktop app
-
-**[Download Strata for Windows, Linux or Mac →](https://github.com/Niko1221/Strata/releases/latest)**
-
-Install the app, choose a model, and start chatting. There is one installer for each system. On first start the app
-downloads the engine for your graphics card. [Help with the installer](docs/INSTALL.md#the-app).
-
-<sub>Files: `Strata-0.2.23-windows-x64-setup.exe` · `Strata-0.2.23-linux-x86_64.AppImage` · `Strata-0.2.23-macos-arm64.dmg`</sub>
-
-<p align="center">
-  <img src="docs/media/app-chat.png" width="900" alt="Strata desktop app with a chat and live code preview side by side">
-  <br><sub>Chat, files and a live preview in one window.</sub>
-</p>
-
-<a id="option-b-the-terminal-one-line"></a>
-
-### Terminal app
-
-Prefer the terminal? Install Strata, then run **`strata launch`**.
-
-<details open>
-<summary><b>Install commands</b></summary>
-
-**Linux / Mac**
-
-```sh
-curl -fsSL --connect-timeout 15 --max-time 120 https://github.com/Niko1221/Strata/releases/latest/download/install.sh -o install.sh && sh install.sh
-```
-
-**Windows PowerShell**
+## Quick start
 
 ```powershell
-irm -TimeoutSec 120 https://github.com/Niko1221/Strata/releases/latest/download/install.ps1 | iex
+# 1) fetch the pinned llama.cpp and compose the overlay into third_party/llama.cpp
+powershell -NoProfile -ExecutionPolicy Bypass -File port/tools/fetch-llama.ps1
+# 2) build the engine (and, optionally, the backend correctness oracle)
+powershell -NoProfile -ExecutionPolicy Bypass -File port/tools/build-engine.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File port/tools/build-engine.ps1 -Target test-backend-ops
+# 3) run
+build\bin\strata-vk.exe --native C:\models\pack.gguf --prompt "Hello" --n 32
 ```
 
-On Windows, open a new terminal afterwards. Then:
+The engine needs the **ARM64** Vulkan loader beside the exe; `build-engine.ps1` stages it. Without it
+`ggml-vulkan.dll` fails to load, the engine silently registers the CPU backend alone, and the output is slow and
+wrong. `--geometry` must list `Vulkan0`.
 
-```sh
-strata launch
-```
+Flags, measurement switches and the full gate list: [port/docs/USAGE.md](port/docs/USAGE.md).
 
-Follow the prompts to download and start a model. [Terminal guide](docs/TERMINAL_LAUNCH.md).
+## Packs measured here
+
+Three Qwen3.8-Flash-Next packs have been driven end to end on this branch. Others should load, but only these three
+have measured numbers behind them.
+
+<details>
+<summary><b>Qwen3.8-Flash-Next Q2</b> — the 2-bit pack, the fastest of the three</summary>
+
+| What | Value |
+| --- | --- |
+| Quantisation | `q2_0` for the expert and projection tensors, `f16` for attention projections |
+| Weights on disk | about 41 GB, two shards |
+| Measured decode | about 17-22 tok/s on one stream, depending on the window |
+| Measured prefill | about 173 tok/s at 512 tokens, 155-183 at 2048 |
+
+Per-family GPU time on the decode graph is dominated by `mul_mat_vec` and `mul_mat_id` for the experts; the
+projections that stay in `f16` are what the prefill tile change below mostly helps.
 
 </details>
 
-<p align="center">
-  <img src="docs/media/terminal-monitor.png" width="900" alt="Strata terminal app showing model activity, speed, memory and recent requests">
-  <br><sub>Watch your model and hardware while it runs.</sub>
-</p>
+<details>
+<summary><b>Gyro-S</b> — trellis experts, lower memory, slower</summary>
 
-<a id="build-from-source"></a>
+Trellis packs (`TQK6`, `TQK7`, `TQ2_T`, `PTQ1_0`) each compile to their own SPIR-V. The per-type firmware was a
+correctness fix before it was a speed one: a shared quant shader cannot decode the trellis types, and using one
+produced a model-wide `-inf` that the correctness oracle did not catch, because its trellis shapes sit below the
+`k >= 256` cooperative gate.
 
-[Build from source](docs/SOURCE_INSTALL.md) · [Docker](docs/DOCKER.md) · [Full install guide](docs/INSTALL.md)
+</details>
 
-<a id="what-you-need"></a>
+<details>
+<summary><b>Gyro-M</b> — the same trellis family, larger</summary>
 
-## Hardware
+Measured for loading and for correctness; the numbers above are from the Q2 pack unless stated otherwise.
 
-| Supported hardware | Guide |
+</details>
+
+## Measured on this machine
+
+Snapdragon X2 Elite Extreme (18 Oryon cores, 47.6 GB unified memory, Adreno X2-90 on Vulkan 1.4, driver
+`30.0.228.10000`), Windows 11 ARM64.
+
+| What | Measured | Notes |
+| --- | --- | --- |
+| **Vulkan**, prefill `--bench-pp 512` | **about 173 tok/s** | median of repeated runs; the 2048-token case measures 155-183 |
+| **Vulkan**, decode, one stream, 8192 context | **17-22 tok/s** | the spread is the measurement window, not a setting |
+| **Vulkan**, decode, 262144 context, same prompt | 21-22 tok/s | same stream as the 8192 case, token for token |
+| read bandwidth, CPU | about 155 GB/s | 14 threads, 68% of the 228 GB/s specification |
+
+Two cautions that come from measuring this machine for a long time:
+
+- **Prefill readings drift.** The same binary on the same prompt can read 149 or 173 tok/s in adjacent rounds, so any
+  prefill change has to be judged from interleaved rounds and a median, never from one run.
+- **Decode readings are stable** (about 0.6% spread), so a decode change can be judged from two or three runs.
+
+## Status
+
+- **Correct first.** The default paths are verified against the CPU backend: the same argmax, logits correlating
+  0.9982 on this pack, and a multi-token continuation that is token for token identical to the recorded reference
+  stream.
+- **Prefill** was the largest measured win of the last pass: the per-thread output tile of the float and the quantised
+  matrix multiply is a startup setting, and moving it from `4x4` to `8x4` (float) and `8x8` (quantised) lifted
+  prefill from about 123 to about 173 tok/s with byte-identical output. Reverting is a single environment
+  variable ([USAGE.md](port/docs/USAGE.md)).
+- **Decode** is bound by the weight traffic of a single column: about 1.7 GB per token on the Q2 pack. Every
+  byte-reduction route measured so far changes the output text, and the port keeps text identical as a hard rule, so
+  those routes are closed rather than pending.
+- **Batching**: `--parallel N` runs N requests in one process on one copy of the weights. It helps; the numbers for
+  this pack are not re-measured since the tile change, and the old 32/64-slot figures in `PERFORMANCE.md` are
+  historical.
+- **CPU + GPU together**: the engine has a `--split-cpu` layer split, and it is measured **slower** on this machine
+  (about -41% at 15% of the layers on the CPU) as well as text-changing, so it is not the default and not recommended.
+- **Pictures**: the plumbing is verified end to end; image understanding is not claimed. See
+  [VISION.md](port/docs/features/VISION.md).
+- **NPU**: the Hexagon path builds, but no DSP session opens on this driver. See
+  [NPU.md](port/docs/features/NPU.md).
+- **DeepSeek-V4.1**: not supported by this component, and the engine says so on the serve line.
+
+## Docs
+
+[`port/docs/README.md`](port/docs/README.md) is the index. Start from what you are:
+
+| You are | Read |
 | --- | --- |
-| **NVIDIA GeForce RTX 20 / 30 / 40 / 50 series** | [NVIDIA setup](docs/INSTALL.md#what-you-need) |
-| **AMD Radeon RX 7700 / 7800 / 7900, RX 9060 / 9070, AI PRO R9700** | [AMD setup](docs/AMD_HIP.md) |
-| **AMD Radeon RX 6800 / 6900 · experimental** | [RX 6000 setup](docs/AMD_HIP.md#rdna2-gfx1030) |
-| **Intel Arc · Linux** | [Intel setup](docs/INTEL_ARC.md) |
-| **Apple Silicon · M1 or newer** | [Mac setup](docs/MAC.md) |
-| **AMD Ryzen AI Max · Strix Halo** | [Strix Halo setup](docs/STRIX_HALO.md) |
-| **NVIDIA DGX Spark · Linux** | [DGX Spark setup](docs/DGX_SPARK_LINUX.md) |
+| **End user**: just run it | the quick start above, then [USAGE.md](port/docs/USAGE.md) |
+| **Contributor**: make it faster | [PERFORMANCE.md](port/docs/PERFORMANCE.md) (current numbers, methodology, what was measured and ruled out) |
+| **Contributor**: pictures | [features/VISION.md](port/docs/features/VISION.md) |
+| **Anyone**: what is known to be broken | [KNOWN-ISSUES.md](port/docs/KNOWN-ISSUES.md) |
+| **Maintainer**: change the vendored tree, the overlay, the gates | [MAINTAINER.md](port/docs/MAINTAINER.md), [UPSTREAM-PATCHES.md](port/docs/UPSTREAM-PATCHES.md) |
+| **Shader author** | [SHADER_CONVENTIONS.md](port/docs/SHADER_CONVENTIONS.md) |
+| **Curious about this machine** | [ADRENO.md](port/docs/ADRENO.md) |
 
-<a id="using-it"></a>
+The one rule in `port/docs`: **no number without a measurement on this machine**, and where something is a hypothesis
+it says so.
 
-## Tools
+## Gates
 
-**Claude Code · Codex CLI · OpenCode · oh-my-pi · pi.dev · Hermes Agent · OpenClaw**, and more through the OpenAI- and Anthropic-compatible APIs.
+Every change passes all of these before it is committed; the commands are in [USAGE.md §5](port/docs/USAGE.md):
 
-Run **`strata connect`** to see setup instructions for your tool. [Connection guide](docs/TERMINAL_LAUNCH.md#connect-your-apps-strata-connect).
+1. CPU and Vulkan agree: correlation >= 0.999 on the logits and the same argmax (`--dump-logits` on both backends),
+   **and the same generated ids for a real prompt** run once with `--gpu vulkan` and once with `--gpu cpu`.
+2. `test-backend-ops -o MUL_MAT -b Vulkan0`: zero failures.
+3. `check-encoding.py`: zero files with encoding damage. `audit-docs.py`: zero document problems.
+4. `check-pin.py`: the overlay still matches `third_party/llama.cpp`.
 
-<a id="guides"></a>
-<a id="how-fast-is-it"></a>
-<a id="how-does-it-work"></a>
-<a id="something-went-wrong"></a>
+[MIT license](LICENSE).
 
-## Help
-
-[All guides](docs) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Report a bug](https://github.com/Niko1221/Strata/issues/new/choose) ·
-[Benchmarks](docs/COMMUNITY_BENCHMARKS.md) · [How it works](docs/HOW_IT_WORKS.md) · [Contribute](.github/CONTRIBUTING.md)
-
-## Sponsors of Strata
-
-<!-- Sponsor logos: one centred row with room for five, each 130 px wide. Add the next sponsor after Olares, with &nbsp;&nbsp;&nbsp;&nbsp; between two logos. -->
-<p align="center">
-  <a href="https://heylinger.com"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/sponsors/linger-logo-white.svg"><img src="docs/media/sponsors/linger-logo-color.svg" alt="Linger" title="Linger" width="130" align="middle"></picture></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://www.olares.com/one"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/sponsors/olares-logo-white.svg"><img src="docs/media/sponsors/olares-logo-color.svg" alt="Olares" title="Olares" width="130" align="middle"></picture></a>
-</p>
-
-## Support Strata
-
-**Help keep local AI open to everyone.** A GitHub sponsorship or a coffee helps fund development and testing on more hardware.
-
-<a href="https://github.com/sponsors/Niko1221"><img src="https://img.shields.io/badge/Sponsor_on_GitHub-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="GitHub Sponsors: sponsor Strata" height="48"></a>
-<a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee: support Strata" height="48"></a>
-
-### Loyal supporters
-
-Thank you to everyone who supports Strata.
-
-<!-- supporters:start (generated from the public GitHub sponsors: one row per level, the biggest supporters first and largest; private sponsors are not listed) -->
-<a href="https://github.com/codeconduit-official"><img src="https://images.weserv.nl/?url=github.com/codeconduit-official.png&w=240&h=240&fit=cover&mask=circle&output=png" width="120" height="120" alt="codeconduit-official" title="codeconduit-official"></a>
-
-<a href="https://github.com/kod88vn"><img src="https://images.weserv.nl/?url=github.com/kod88vn.png&w=160&h=160&fit=cover&mask=circle&output=png" width="80" height="80" alt="kod88vn" title="kod88vn"></a>
-<a href="https://github.com/router0mail"><img src="https://images.weserv.nl/?url=github.com/router0mail.png&w=160&h=160&fit=cover&mask=circle&output=png" width="80" height="80" alt="router0mail" title="router0mail"></a>
-<a href="https://github.com/kingdonb"><img src="https://images.weserv.nl/?url=github.com/kingdonb.png&w=160&h=160&fit=cover&mask=circle&output=png" width="80" height="80" alt="kingdonb" title="kingdonb"></a>
-<a href="https://github.com/Daisame"><img src="https://images.weserv.nl/?url=github.com/Daisame.png&w=160&h=160&fit=cover&mask=circle&output=png" width="80" height="80" alt="Daisame" title="Daisame"></a>
-
-<a href="https://github.com/ryan4yin"><img src="https://images.weserv.nl/?url=github.com/ryan4yin.png&w=112&h=112&fit=cover&mask=circle&output=png" width="56" height="56" alt="ryan4yin" title="ryan4yin"></a>
-<a href="https://github.com/themactep"><img src="https://images.weserv.nl/?url=github.com/themactep.png&w=112&h=112&fit=cover&mask=circle&output=png" width="56" height="56" alt="themactep" title="themactep"></a>
-<a href="https://github.com/macintog"><img src="https://images.weserv.nl/?url=github.com/macintog.png&w=112&h=112&fit=cover&mask=circle&output=png" width="56" height="56" alt="macintog" title="macintog"></a>
-<a href="https://github.com/bisonbet"><img src="https://images.weserv.nl/?url=github.com/bisonbet.png&w=112&h=112&fit=cover&mask=circle&output=png" width="56" height="56" alt="bisonbet" title="bisonbet"></a>
-<a href="https://github.com/vizv"><img src="https://images.weserv.nl/?url=github.com/vizv.png&w=112&h=112&fit=cover&mask=circle&output=png" width="56" height="56" alt="vizv" title="vizv"></a>
-<a href="https://github.com/seoulworker"><img src="https://images.weserv.nl/?url=github.com/seoulworker.png&w=112&h=112&fit=cover&mask=circle&output=png" width="56" height="56" alt="seoulworker" title="seoulworker"></a>
-<a href="https://github.com/jaceknoga"><img src="https://images.weserv.nl/?url=github.com/jaceknoga.png&w=112&h=112&fit=cover&mask=circle&output=png" width="56" height="56" alt="jaceknoga" title="jaceknoga"></a>
-<a href="https://github.com/jackyini"><img src="https://images.weserv.nl/?url=github.com/jackyini.png&w=112&h=112&fit=cover&mask=circle&output=png" width="56" height="56" alt="jackyini" title="jackyini"></a>
-<a href="https://github.com/moruku36"><img src="https://images.weserv.nl/?url=github.com/moruku36.png&w=112&h=112&fit=cover&mask=circle&output=png" width="56" height="56" alt="moruku36" title="moruku36"></a>
-<a href="https://github.com/hrkgk"><img src="https://images.weserv.nl/?url=github.com/hrkgk.png&w=112&h=112&fit=cover&mask=circle&output=png" width="56" height="56" alt="hrkgk" title="hrkgk"></a>
-<!-- supporters:end -->
-
-All supporters and how to support Strata: [SUPPORTERS.md](SUPPORTERS.md)
-
-[MIT license](LICENSE) · [Credits and model licenses](docs/HOW_IT_WORKS.md#credits) · [Privacy](docs/SAFETY.md)
-
-<a id="option-c-let-your-ai-set-it-up"></a>
-
-<sub>For AI tools and automated readers: <a href="AGENTS.md">technical reference</a> · <a href="docs/AI_SETUP.md">setup instructions</a>.</sub>
-
-**Sponsorships, hardware partnerships or collaborations:** [niko.veit@outlook.com](mailto:niko.veit@outlook.com).
-
+<sub>For AI tools and automated readers: <a href="AGENTS.md">technical reference</a>.</sub>

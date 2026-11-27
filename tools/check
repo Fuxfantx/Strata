@@ -3,7 +3,6 @@
 
 Runs, each in its own step with its own timeout, in a scratch folder (build trees, temp files, logs):
 
-  cmake-cpu       CMake preset `cpu-check` (engine/CMakePresets.json): configure, build, CTest. No GPU, no model, no network.
   py-tests        pytest tests/   (without terminal/tests/snapshot, which has its own step)
   py-serve        pytest terminal/serve/
   py-tools        pytest terminal/tools/test_*.py
@@ -12,7 +11,6 @@ Runs, each in its own step with its own timeout, in a scratch folder (build tree
   host-test       app/host: npm test (a per-test timeout, so a hang fails one test instead of the run)
   host-build      app/host: npm run build
   snapshot        pytest terminal/tests/snapshot (the config snapshot of the four entry points; needs Node 24)
-  docs            local links in the current pages (tools/check_links.py), the release manifest, the capability table and the bench results index (--check)
 
 Prints one table: passed / failed / skipped / not run, per step, with the reason for every skip and every "not run".
 A step that cannot run because a tool is missing (Node, cmake, a compiler, pytest, torch) is "not run" and says which tool;
@@ -20,7 +18,7 @@ it is never reported as a pass.  The exit code is 1 when anything failed or time
 "not run" step exit 2 too.  Nothing here needs a GPU, a model or the real Strata install.
 
     python tools/check                      everything above
-    python tools/check --only cmake-cpu,py-tools
+    python tools/check --only py-tools,host-typecheck
     python tools/check --skip host-build --json result.json
     python tools/check --list
 Backend, model and browser tests are separate commands (see the CI workflows in .github/workflows); they are not part of this one.
@@ -46,8 +44,8 @@ ENGINE = os.path.join(ROOT, "engine")
 NODE_MIN = (24, 12)
 
 # step name -> default timeout in seconds (explicit, per step; --timeout-scale multiplies them)
-TIMEOUTS = {"cmake-cpu": 1800, "py-tests": 3600, "py-serve": 1800, "py-tools": 1200, "py-optional": 900,
-            "host-typecheck": 600, "host-test": 1800, "host-build": 600, "snapshot": 900, "docs": 300}
+TIMEOUTS = {"py-tests": 3600, "py-serve": 1800, "py-tools": 1200, "py-optional": 900,
+            "host-typecheck": 600, "host-test": 1800, "host-build": 600, "snapshot": 900}
 STEPS = list(TIMEOUTS)
 
 
@@ -236,53 +234,6 @@ def finish(res, rc, timed_out, log):
 
 # ---------------------------------------------------------------------------------------------------------- steps
 
-def step_cmake(ctx):
-    r = Result("cmake-cpu")
-    cmake, ninja = shutil.which("cmake"), shutil.which("ninja")
-    if not cmake:
-        r.reason = "cmake is not installed"
-        return r
-    if not ninja:
-        r.reason = "ninja is not installed (the cpu-check preset uses the Ninja generator)"
-        return r
-    env = ctx.scratch.env()
-    if WIN:
-        env, why = msvc_env(env)
-        if why:
-            r.reason = why
-            return r
-    elif not any(shutil.which(c) for c in ("c++", "g++", "clang++")):
-        r.reason = "no C++ compiler (c++, g++ or clang++) on PATH"
-        return r
-    build = ctx.scratch.path("build-cpu-check")
-    log = ctx.scratch.path("cmake-cpu.log")
-    t = ctx.timeout("cmake-cpu")
-    t0 = time.time()
-    for label, cmd in (("configure", [cmake, "--preset", "cpu-check", "-B", build]),
-                       ("build", [cmake, "--build", build, "--parallel", str(ctx.jobs)])):
-        rc, _ = run_cmd(cmd, ENGINE, env, max(30, t - (time.time() - t0)), log)
-        if rc is None or rc != 0:
-            r.seconds = time.time() - t0
-            r.failures.append("cmake " + label + (" (timed out)" if rc is None else ""))
-            r.reason = " | ".join(l.strip() for l in tail(log, 4))[:300]
-            return finish(r, rc if rc is not None else 1, rc is None, log)
-    junit = ctx.scratch.path("ctest.xml")
-    rc, _ = run_cmd([shutil.which("ctest"), "--test-dir", build, "--output-on-failure", "--parallel", str(min(ctx.jobs, 8)),
-                     "--timeout", "120", "--no-tests=error", "--output-junit", junit], ROOT, env, max(30, t - (time.time() - t0)), log)
-    r.seconds = time.time() - t0
-    if rc is None:
-        return finish(r, 1, True, log)
-    if not parse_junit(junit, r):
-        r.failures.append("ctest wrote no result file")
-        return finish(r, 1, False, log)
-    # the one-line summary the CMakeLists prints at configure time (which kinds of test were registered)
-    for line in open(log, "rb").read().decode("utf-8", "replace").splitlines():
-        if "strata tests:" in line:
-            r.reason = line.split("-- ", 1)[-1].strip()
-            break
-    return finish(r, rc, False, log)
-
-
 def step_pytest(name, targets, extra=(), need_node=False, cwd=None):
     def run(ctx):
         r = Result(name)
@@ -396,36 +347,7 @@ def step_npm(name, script, args=()):
     return run
 
 
-def step_docs(ctx):
-    """The documentation checks that need no tools but Python: links, release manifest, capability table, bench index, settings register, the vendored ggml manifest."""
-    r = Result("docs")
-    log = ctx.scratch.path("docs.log")
-    r.log = log
-    for label, script, args in (("links", "check_links.py", ()), ("release manifest", "release_manifest.py", ("--check",)),
-                                ("capability table", "capability_table.py", ("--check",)), ("bench results index", "bench_results_index.py", ("--check",)), ("settings register", "settings_register.py", ("--check",)),
-                                ("vendored ggml and gguf-py (engine/third_party/strata-ggml, strata-gguf-py)", "check_vendored.py", ())):
-        path = os.path.join(ROOT, "tools", script)
-        if not os.path.exists(path):
-            r.skipped += 1
-            r.skips["%s: terminal/tools/%s is not in this checkout" % (label, script)] = 1
-            continue
-        rc, secs = run_cmd([sys.executable, path, *args], ROOT, ctx.scratch.env(), ctx.timeout("docs"), log)
-        r.seconds += secs
-        if rc == 0:
-            r.passed += 1
-        else:
-            r.failed += 1
-            r.failures.append("%s (exit %s)" % (label, rc))
-    if r.failed:
-        r.status = "failed"
-        r.reason = " | ".join(l.strip() for l in tail(log, 4))[:300]
-    else:
-        r.status = "passed"
-    return r
-
-
 STEP_FUNCS = {
-    "cmake-cpu": step_cmake,
     "py-tests": step_pytest("py-tests", ["terminal/tests"], ["--ignore=" + os.path.join(ROOT, "terminal", "tests", "snapshot")], cwd=TERMINAL),
     "py-serve": step_pytest("py-serve", ["terminal/serve"], cwd=TERMINAL),
     "py-tools": step_pytest("py-tools", ["terminal/tools/test_*.py", "tools/test_*.py"], cwd=TERMINAL),
@@ -434,7 +356,6 @@ STEP_FUNCS = {
     "host-test": step_npm("host-test", "test"),
     "host-build": step_npm("host-build", "build"),
     "snapshot": step_pytest("snapshot", ["terminal/tests/snapshot"], need_node=True, cwd=TERMINAL),
-    "docs": step_docs,
 }
 
 

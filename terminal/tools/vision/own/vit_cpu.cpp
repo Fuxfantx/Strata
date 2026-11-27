@@ -183,7 +183,7 @@ bool VitCpu::load(const Gguf& gg, const VitGeometry& g, std::string& err) {
 
 int vit_cpu_round_kind(int weight_kind, const char* env) {
     // No rounding by default, for every weight type: the tower then follows the float32 reference (VitRef).  Until 11-14 BF16 weights (Qwen3.8) rounded
-    // the matrix inputs to BF16 by default, which matched llama.cpp's reader on code4217.png (0.9997) but not float32: 16 pictures, 12,308 tokens, 45 under
+ // the matrix inputs to BF16 by default, which matched llama.cpp's reader on (0.9997) but not float32: 16 pictures, 12,308 tokens, 45 under
     // cosine 0.99 against VitRef with the rounding, 0 without (code4217 token 47: 0.627 -> 1.000).  STRATA_VIT_REF_ROUND=1 brings the rounding back.
     // float32 or Q8_0-expanded matrices have no 16-bit type to round to.
     if (weight_kind != 1 && weight_kind != 2) return 0;

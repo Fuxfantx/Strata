@@ -5,9 +5,9 @@
  * 4 request slots by default instead of making them queue. Two engine facts decide how far that can go:
  *
  *   - Every slot keeps its OWN conversation state in graphics memory at the model's full context
- *     (docs/BATCHING.md, "What a slot costs"): the context is per slot, so 4 slots cost 4 times one slot.
- *   - Without `--batch-mtp` the slots decode WITHOUT the draft layer. With it, each slot verifies one draft per window
- *     (docs/BATCHING.md), at the price of a little more memory per slot. A request that runs alone still takes the
+ *     (the cost of a slot): the context is per slot, so 4 slots cost 4 times one slot.
+ *   - Without `--batch-mtp` the slots decode WITHOUT the draft layer. With it, each slot verifies one draft per window,
+ *     at the price of a little more memory per slot. A request that runs alone still takes the
  *     engine's solo path, so a single chat is not slower for having slots.
  *
  * Recommend, never force: a number the person sets (Expert mode, or a value already in the model's saved settings)
@@ -60,7 +60,7 @@ export const NEXT_CARD_OTHER_GB = 2.0;
  *     the text is exactly the batch text.
  *   - 12 GB RTX 3060: a lone chat 35.6 tok/s with it against 37.8 without, 2 chats 37.2 against 33.8, 4 chats 42.5 against 38.4, and
  *     400 MiB less expert cache: not worth it on a small card.
- *   - 2 cards in a layer split with all experts in VRAM: -22% (docs/BATCHING.md): never on a layer split.
+ *   - 2 cards in a layer split with all experts in VRAM: -22%: never on a layer split.
  * 'auto' turns it on for one card of at least BATCH_MTP_MIN_VRAM_GB with a draft layer, 2 or more slots, and room for the slot drafters
  * with a margin. 'off' never adds it. Expert mode decides either way: `--batch-mtp` in the engine arguments, or "batchMtp": true / false
  * in the model's settings (or the load's values).

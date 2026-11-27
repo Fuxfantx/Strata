@@ -2,7 +2,7 @@
 
 This folder is the app's Node host (`server/`) and its web interface (`src/`, React and Vite). The desktop shell that wraps
 them is [`../desktop`](../desktop) (Tauri). The engine and Strata Control are Python and C++ and live elsewhere in the
-repository; see [docs/SOURCE_INSTALL.md](../../docs/SOURCE_INSTALL.md) and [packaging/README.md](../../tools/packaging/README.md).
+repository.
 
 ## Start from a fresh clone
 
@@ -38,7 +38,6 @@ is real: no engine is started, no model is loaded, no files outside its temporar
   updates and engine starts. A source checkout has no Control, so those paths keep their older behaviour; how Control is
   packaged is in [packaging/README.md](../../tools/packaging/README.md).
 
-The version numbers in `package.json` are the app's. They are checked against `docs/data/release.json` by `python tools/release_manifest.py --check`.
 
 ## Styles, icons and fonts
 

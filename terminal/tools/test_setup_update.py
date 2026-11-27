@@ -1,4 +1,4 @@
-"""Tests for `setup.py --update` (#475, UPDATE.bat / update.sh): it refreshes what a start would - the Python packages,
+"""Tests for `setup.py --update` (#475, UPDATE.bat / UPDATE.bat): it refreshes what a start would - the Python packages,
 the engine, each model's config and draft subset - and never starts the model.  Every outside effect is mocked: no
 GPU, no downloads, nothing written outside a temp folder.
 
@@ -47,7 +47,7 @@ class Update(unittest.TestCase):
             rc, pip, eng, dv, start, call, out = self.run_update([p])
         self.assertEqual(rc, 0)
         pip.assert_called_once()
-        eng.assert_called_once_with("URL", rebuild=False)
+        eng.assert_called_once_with()
         dv.assert_called_once()
         self.assertEqual(dv.call_args[0][1], "en")                 # the model's own subset is kept
         start.assert_not_called()
@@ -66,13 +66,12 @@ class Update(unittest.TestCase):
                 rc, pip, eng, dv, start, call, out = self.run_update([p])
             self.assertIn("Strata is updated (engine 0.1.49.2)", out)
 
-    def test_build_compiles_the_installed_engine_again(self):
-        """#5214: --update --build used to skip the engine step; it now asks for the compile (rebuild=True)."""
+    def test_build_keeps_the_compiled_engine_path(self):
         with tempfile.TemporaryDirectory() as d:
             p = self.config(Path(d))
             rc, pip, eng, dv, *_ = self.run_update([p], {"build": True})
         self.assertEqual(rc, 0)
-        eng.assert_called_once_with("URL", rebuild=True)
+        eng.assert_not_called()
         self.assertEqual(dv.call_args[0][1], "cjk")
 
     def test_nothing_installed(self):
@@ -83,7 +82,7 @@ class Update(unittest.TestCase):
         self.assertIn("START-HERE.bat", out)
 
     def test_a_json_that_is_no_model_config_is_skipped(self):
-        """#549: a strata-*.json without "args" (not written by setup) stopped update.sh with KeyError: 'args'."""
+        """#549: a strata-*.json without "args" (not written by setup) stopped UPDATE.bat with KeyError: 'args'."""
         with tempfile.TemporaryDirectory() as d:
             p = self.config(Path(d))
             other = Path(d) / "strata-notes.json"

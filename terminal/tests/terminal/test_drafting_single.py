@@ -17,7 +17,7 @@ from strata_cli.launch.runner import derive_config
 from strata_control import drafting
 
 NAMES = {"qwen": "qwen3.8-flash-next-iq3_s", "gyro": "qwen3.8-flash-next-gyro-gyro-s", "unsloth": "qwen3.8-flash-next-unsloth-ud-q4_k_xl",
-         "coder": "qwen3.8-flash-next-coder-iq1_m", "nvfp4": "qwen3.8-flash-next-nvfp4-nvfp4", "swift": "qwen3.8-flash-next-swift-q4_k_m"}
+         "coder": "qwen3.8-flash-next-coder-iq1_m", "swift": "qwen3.8-flash-next-swift-q4_k_m"}
 HARDWARE = (("cuda", ["sm_120"]), ("cuda", ["sm_86"]), ("cuda", ["sm_89"]), ("hip", ["gfx1151"]), ("hip", ["gfx1201"]), ("metal", []), ("sycl", ["arc_a"]))
 MTP_ONLY = ("--mtp", "--mtp-q4", "--batch-mtp", "--spec-min-p", "--mtp-draft-vocab")
 
@@ -105,7 +105,7 @@ class EveryChoiceOnEveryBackend(Base):
                 self.assertEqual((d.drafter, loaded(args)), ("mtp", {"mtp"}), (backend, mode))
 
     def test_other_families_never_get_dflash2_whatever_is_saved(self):
-        for family in ("coder", "nvfp4", "swift"):
+        for family in ("coder", "swift"):
             for mode in (None, "auto", "mtp", "dflash2"):
                 if family == "coder" and mode == "dflash2":
                     continue                                    # #5240: the Coder named runs DFlash2 (test_drafting_coder_named.py)

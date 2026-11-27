@@ -234,7 +234,7 @@ class Families(unittest.TestCase):
         g = Path("Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf")
         self.assertEqual(pictures.family_of({}, g, "swift"), "swift")
         self.assertEqual(pictures.family_of({}, g, "qwen36"), None)
-        self.assertEqual(pictures.family_of({}, g, "nvfp4"), None)
+        self.assertEqual(pictures.family_of({}, g, "deepseek"), None)
         self.assertEqual(pictures.family_of({"model_name": "iq3_s"}, g), "qwen", "a hand-made name still gets the original's file")
         self.assertEqual(pictures.family_of({"model_name": "swift-1.5-iq3_s"}, g), "swift")
         self.assertEqual(pictures.family_of({}, Path("Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf")), "swift")

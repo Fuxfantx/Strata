@@ -1,0 +1,60 @@
+#version 450
+
+// Repack q2_0 weights into q4_0 weights.  One input block holds 64 values in 16 bytes (two bits each); two output
+// blocks hold the same 64 values with four bits each.  The scale is copied as is, and a two bit value v becomes the
+// nibble v + 6, which is the signed value v - 2 seen from q4_0, so the repacked block dequantizes to exactly the same
+// numbers as the original.
+//
+// Used for prefill only: the q4_0 integer dot kernel is about 1.7 times faster than the q2_0 one on this device, and
+// a conversion pass costs a small fraction of one matmul pass over the same weights.
+
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct block_q2_0 {
+    float16_t d;
+    uint8_t   qs[16];
+};
+
+struct block_q4_0 {
+    float16_t d;
+    uint8_t   qs[16];
+};
+
+layout (binding = 0) readonly buffer A { block_q2_0 data_a[]; };
+layout (binding = 1) writeonly buffer B { block_q4_0 data_b[]; };
+
+#if defined(PARAM_BLOCK_ENABLED)
+#define PARAM_BLOCK_BINDING 12
+layout (binding = PARAM_BLOCK_BINDING, std430) readonly buffer parameter
+#else
+layout (push_constant) uniform parameter
+#endif
+{
+    uint n_blocks;
+    uint base;
+};
+
+void main() {
+    const uint ib = base + gl_GlobalInvocationID.x;
+    if (ib >= n_blocks) {
+        return;
+    }
+
+    // Two output blocks of 32 values each.
+    data_b[2u * ib].d     = data_a[ib].d;
+    data_b[2u * ib + 1u].d = data_a[ib].d;
+
+    // Output byte k of a half holds the values 32*half + 2k and 32*half + 2k + 1, in the low and high nibble.
+    for (uint h = 0u; h < 2u; ++h) {
+        for (uint k = 0u; k < 16u; ++k) {
+            const uint i0 = h * 32u + 2u * k;
+            const uint i1 = i0 + 1u;
+            const uint v0 = (uint(data_a[ib].qs[i0 >> 2u]) >> (2u * (i0 & 3u))) & 3u;
+            const uint v1 = (uint(data_a[ib].qs[i1 >> 2u]) >> (2u * (i1 & 3u))) & 3u;
+            data_b[2u * ib + h].qs[k] = uint8_t((v0 + 6u) | ((v1 + 6u) << 4u));
+        }
+    }
+}

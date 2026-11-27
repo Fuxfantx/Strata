@@ -9,7 +9,7 @@ try{const native=await(await fetch('http://127.0.0.1:5161/api/native')).json();f
 let index=Object.keys(catalog).length;
 const added={};for(const text of [...extra].sort()){const id=`s${String(++index).padStart(4,'0')}`;catalog[id]=text;added[id]=text;}
 await writeFile('src/locales/en.json',JSON.stringify(catalog,null,2)+'\n');
-const extraPath='docs/checkpoints/before-language-and-model-fixes-2026-10-14/extra-strings.json';
+const extraPath='.localization-extra.json';
 const previous=JSON.parse(await readFile(extraPath,'utf8').catch(()=>'{}'));
 await writeFile(extraPath,JSON.stringify({...previous,...added},null,2)+'\n');
 console.log(JSON.stringify({added:extra.size,total:index,strings:added},null,2));

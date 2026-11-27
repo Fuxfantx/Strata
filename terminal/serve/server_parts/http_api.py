@@ -13,7 +13,6 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from strata_control import engine_component
 from strata_control import reader_room
-from strata_control import hipblaslt_tuning
 
 from serve.server_parts.base import LOOPBACK_NAMES
 
@@ -332,7 +331,7 @@ SHARED_KEYS = ("reasoning_effort", "reasoning_budget_tokens", "temperature", "to
                "experimental_speed_projection")
 
 
-def load_shared_settings(path, warn=print, *, hy4: bool = False) -> dict:
+def load_shared_settings(path, warn=print) -> dict:
     """The Chat settings kept next to a config between starts, read so that one bad key cannot erase the others.
 
     The strict reader below belongs to POST /settings, where a client is there to be told which key is wrong and can
@@ -357,13 +356,13 @@ def load_shared_settings(path, warn=print, *, hy4: bool = False) -> dict:
     out = {}
     for key, value in doc.items():
         try:
-            out.update(clean_shared_defaults({key: value}, hy4=hy4))
+            out.update(clean_shared_defaults({key: value}))
         except ValueError as e:
             warn(f"[strata] one Chat setting in {path} is skipped ({e}); the others still apply")
     return out
 
 
-def clean_shared_defaults(d, hy4: bool = False) -> dict:
+def clean_shared_defaults(d) -> dict:
     """The Chat settings other apps get (POST /settings): only known keys, each checked; ValueError names a bad one."""
     if d is None:
         return {}
@@ -375,13 +374,8 @@ def clean_shared_defaults(d, hy4: bool = False) -> dict:
             continue
         number = isinstance(value, (int, float)) and not isinstance(value, bool)
         if key == "reasoning_effort":
-            if hy4 and value == "xhigh":
-                value = "max"
-            elif hy4 and value == "no_think":
-                value = "none"
-            if value not in ("none", "low", "medium", "high") + (("max",) if hy4 else ()):    # Hy4's template also has max
-                raise ValueError("reasoning_effort: none, low, medium, high or max" if hy4
-                                 else "reasoning_effort: none, low, medium or high")
+            if value not in ("none", "low", "medium", "high"):
+                raise ValueError("reasoning_effort: none, low, medium or high")
         elif key == "temperature":
             if not number or not 0 <= value <= 2:
                 raise ValueError("temperature: 0..2")
@@ -636,15 +630,7 @@ MODEL_CARD_SAMPLING = {
     # Qwen3.6-35B-A3B: the general-task sets (the card's precise-coding set is temperature 0.6, presence_penalty 0)
     "qwen35moe": {"thinking": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.5},
                   "instruct": {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}},
-    # Hy4-Flash (HY-4-Flash-200B): HuggingFace model card defaults when request/config omits sampling
-    "hy4flash": {"thinking": {"temperature": 0.9, "top_p": 1.0},
-                 "instruct": {"temperature": 0.9, "top_p": 1.0}},
 }
-# Inkling-2-Mini (#7092): the model card's own sampling is the generation_config.json of thinkingmachines/Inkling-2-Mini (read 2026-11-25):
-# {"do_sample": true, "temperature": 1.0}.  The README names no other sampling value (no top_p, top_k, min_p or penalty), so only the temperature is set here and the
-# engine keeps its own top_k 64 / top_p 1.0.  Before, a request that named nothing got the engine's temperature 0 (greedy), which can loop.
-MODEL_CARD_SAMPLING.update({arch: {"thinking": {"temperature": 1.0}, "instruct": {"temperature": 1.0}}
-                            for arch in ("inkling2_loop", "inkling2", "inkling2_loop_text")})
 
 
 # The card's penalties: a greedy request must not get them (see model_card_sampling)
@@ -666,8 +652,8 @@ def request_asks_sampling(*layers) -> bool:
 
 
 # #3354: the families whose engine drafts only for a strictly greedy request, so the model card's sampling (Qwen3.6's presence_penalty 1.5)
-# switches the MTP drafts off ("drafts accepted 0 of 0").  Flash-Next (qwen4exp: Qwen3.8, Gyro) and Hy4-Flash verify the drafts of sampled
-# requests, so for them the card stays the default of a request that names no sampling (#7070: Gyro-S solved far fewer tasks when it ran greedy).
+# switches the MTP drafts off ("drafts accepted 0 of 0").  Flash-Next (qwen4exp: Qwen3.8, Gyro) verifies the drafts of sampled
+# requests, so for it the card stays the default of a request that names no sampling (#7070: Gyro-S solved far fewer tasks when it ran greedy).
 GREEDY_FOR_DRAFTS = frozenset({"qwen35moe"})
 
 
@@ -760,8 +746,6 @@ def with_component_engine(cfg: dict) -> dict:
     cfg["exe"] = _component_exe(cfg["exe"], cfg)
     cfg["lib_dirs"] = [*engine_component.package_lib_dirs(Path(cfg["exe"]).parent), *(cfg.get("lib_dirs") or [])]
     cfg = with_current_reader(cfg, Path(cfg["exe"]).parent)
-    if cfg.get("backend") == "hip":     # AMD: the package's own hipBLASLt tuning table for this card, when its hipBLASLt version matches
-        cfg = hipblaslt_tuning.apply(cfg, Path(cfg["exe"]).parent, say=lambda line: print(line, flush=True))
     return cfg
 
 

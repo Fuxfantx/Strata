@@ -6,7 +6,7 @@
  *   reader, send a real picture through the host's own /v1 endpoint and check that the answer names what is in it, unload, shut down.
  *
  *   node vision-e2e.mjs --install <folder with node/ host/ control/> --components <folder holding engine/<package with strata-vision>> \
- *        --work <scratch> --family qwen --model IQ3_XXS --data <data folder that has (or will get) the model files> --image shapes.png [--device cpu|gpu]
+ * --work <scratch> --family qwen --model IQ3_XXS --data <data folder that has (or will get) the model files> --image [--device cpu|gpu]
  *
  * The picture has a red circle, a blue square, a green triangle and the text "STRATA 42". The run exits 1 if any step fails.
  */

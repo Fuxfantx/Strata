@@ -39,7 +39,7 @@ import re
 from dataclasses import dataclass, field
 
 CHUNK_STEPS = (1024, 512, 256)                   # a smaller prompt chunk, tried after the default one (1024 is the value measured end to end)
-RESERVE_FLOOR_MIB = 100                 # the lowest reserve the engine accepts without complaint (docs/INTEL.md); never raised
+RESERVE_FLOOR_MIB = 100                 # the lowest reserve the engine accepts without complaint; never raised
 AUTO_CHUNK = 2048                       # what --prefill auto came to on the 8 GB card
 MIN_SLOTS = 128                         # the engine wants 128 cache slots to lend the prompt path; below that it is slow
 SLOT_MIB = 1.243

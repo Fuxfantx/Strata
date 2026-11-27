@@ -47,7 +47,7 @@ class AutoAndTheBackends(unittest.TestCase):
                 self.assertEqual(drafting.choice_of("auto", family=family, backend=backend), "dflash2", (backend, family))
         self.assertEqual(drafting.choice_of("auto", family="qwen", backend=None), "mtp", "an unknown computer is the MTP")
         self.assertEqual(drafting.choice_of("auto", family="qwen", backend="cpu"), "mtp", "an engine without the code is the MTP")
-        for family in ("coder", "swift", "nvfp4", "deepseek41"):
+        for family in ("coder", "swift", "deepseek41"):
             self.assertEqual(drafting.choice_of("auto", family=family, backend="cuda"), "mtp", family)
 
     def test_intel_runs_dflash2_and_a_build_without_the_code_does_not(self):
@@ -163,7 +163,7 @@ class Decisions(unittest.TestCase):
         for name in (GYRO, "qwen3.8-flash-next-q2_0", "qwen3.8-flash-next-iq3_xxs"):
             self.assertEqual(drafting.decide("dflash2", model_name=name, data_dir=self.data, backend="cuda").drafter, "dflash2", name)
         self.assertTrue(drafting.supported_model(family="qwen") and drafting.supported_model(family="gyro"))
-        self.assertFalse(drafting.supported_model(family="coder") or drafting.supported_model(family="swift") or drafting.supported_model(family="nvfp4"))
+        self.assertFalse(drafting.supported_model(family="coder") or drafting.supported_model(family="swift"))
         coder = "qwen3.8-flash-next-coder-iq3_xxs"                 # #5240: the Coder runs DFlash2 when it is chosen by name; Auto keeps the MTP
         self.assertEqual(drafting.decide("dflash2", model_name=coder, data_dir=self.data, backend="cuda").drafter, "dflash2")
         self.assertEqual(drafting.decide("auto", model_name=coder, data_dir=self.data, backend="cuda").drafter, "mtp")
@@ -467,7 +467,7 @@ class UnslothAndTheOtherFlashNextFiles(unittest.TestCase):
                "qwen3.8-flash-next-unsloth-ud-q6_k_xl", "qwen3.8-flash-next-unsloth-q8_0")
     FLASH_NEXT = ("qwen3.8-flash-next", "qwen3.8-flash-next-q2_0", "qwen3.8-flash-next-iq2_xs", "qwen3.8-flash-next-iq3_xxs", "qwen3.8-flash-next-iq3_s",
                   "qwen3.8-flash-next-gyro-gyro-s", "qwen3.8-flash-next-gyro-gyro-m")
-    OTHERS = ("qwen3.8-flash-next-coder-iq1_m", "qwen3.8-flash-next-nvfp4-nvfp4", "qwen3.8-flash-next-nvfp4-nvfp4-nvidia", "qwen3.8-flash-next-nvfp4-nvfp4-qad",
+    OTHERS = ("qwen3.8-flash-next-coder-iq1_m",
               "swift-1.5-iq2_xs", "swift-1.5-q4_0", "qwen3.6-35b-a3b-ud-q4_k_xl", "deepseek-v4.1-flash", "qwen3.8-flash-next-unsloth", "qwen3.8-flash-next-unslothx-q8_0")
     HARDWARE = (("cuda", ["sm_120"]), ("hip", ["gfx1151"]), ("metal", None), ("sycl", ["8086"]))
 
@@ -478,7 +478,7 @@ class UnslothAndTheOtherFlashNextFiles(unittest.TestCase):
         for name in self.OTHERS:
             self.assertFalse(drafting.supported_model(name), name)
         self.assertTrue(drafting.supported_model(None, "unsloth"))
-        for family in ("swift", "coder", "nvfp4", "qwen36", "deepseek41"):
+        for family in ("swift", "coder", "qwen36", "deepseek41"):
             self.assertFalse(drafting.supported_model(None, family), family)
         self.assertEqual(drafting.SUPPORTED_FAMILIES, ("qwen", "gyro", "unsloth"))
 
@@ -488,7 +488,6 @@ class UnslothAndTheOtherFlashNextFiles(unittest.TestCase):
         mac = (ROOT.parent / "engine" / "metal" / "setup_mac.py").read_text(encoding="utf-8")
         self.assertIn('"name": "qwen3.8-flash-next-unsloth"', setup)
         self.assertIn('"name": "qwen3.8-flash-next-coder"', setup)
-        self.assertIn('"name": "qwen3.8-flash-next-nvfp4"', setup)
         self.assertGreaterEqual(setup.count("\"model_name\": f\"{fam['name']}-{model.lower()}\""), 3)
         self.assertIn("f\"{fam['name']}-{model.lower()}\"", mac)
         for model in ("UD-IQ4_XS", "UD-Q4_K_XL", "UD-Q5_K_XL", "UD-Q6_K_XL", "Q8_0"):
@@ -523,9 +522,9 @@ class UnslothAndTheOtherFlashNextFiles(unittest.TestCase):
                         self.assertNotIn(flag, args, (backend, name, flag))
                     self.assertEqual(args[args.index("--spec") + 1], "8" if (backend, archs) == ("hip", ["gfx1151"]) else "6", "Strix Halo 8 (RESULTS-CONF.md 11-08), every other card 6")
 
-    def test_swift_coder_and_nvfp4_stay_on_the_mtp(self):
+    def test_swift_and_coder_stay_on_the_mtp(self):
         for backend, archs in self.HARDWARE:
-            for name in ("qwen3.8-flash-next-coder-iq1_m", "qwen3.8-flash-next-nvfp4-nvfp4", "swift-1.5-iq2_xs"):
+            for name in ("qwen3.8-flash-next-coder-iq1_m", "swift-1.5-iq2_xs"):
                 for mode in (None, "auto", "dflash2"):
                     if mode == "dflash2" and "-coder-" in name:
                         continue                                    # #5240: the Coder named DFlash2 runs it (test_drafting_coder_named.py)
@@ -542,7 +541,7 @@ class UnslothAndTheOtherFlashNextFiles(unittest.TestCase):
     def test_by_family_the_terminal_and_the_app_agree(self):
         for backend, _ in self.HARDWARE:
             self.assertEqual(drafting.choice_of("auto", family="unsloth", backend=backend), "dflash2", backend)
-            for family in ("swift", "coder", "nvfp4"):
+            for family in ("swift", "coder"):
                 self.assertEqual(drafting.choice_of("auto", family=family, backend=backend), "mtp", (backend, family))
         # the app's own copies of the rule (the host and the page) name the same families and the same names
         host = (ROOT.parent / "app" / "host" / "server" / "native-settings.mjs").read_text(encoding="utf-8")

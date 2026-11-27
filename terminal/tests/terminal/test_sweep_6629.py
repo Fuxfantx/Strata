@@ -1,6 +1,6 @@
 """Regression tests for sweep #6614-#6629:
 - #4891: doctor.py & models.py resolve pruned engine / shape-engine / control component paths for vision.exe, --expert-profile, and cwd.
-- #6623: updater.py never tests `strata-engine` against a Hy4-Flash (`--engram`) or Inkling (`--dspark`) config and matches shape components cleanly.
+- #6623: updater.py never tests `strata-engine` against a shape engine's config and matches shape components cleanly.
 """
 from __future__ import annotations
 
@@ -102,63 +102,55 @@ class PrunedComponentPathTests(unittest.TestCase):
 
 
 class UpdaterSmokeComponentRoutingTests(unittest.TestCase):
-    """#6623: updater smoke test must match configs to their engine component and never pass --engram to `strata`."""
+    """#6623: updater smoke test must match configs to their engine component and never pass a shape engine's flags to `strata`."""
 
-    def test_config_component_id_distinguishes_general_hy4_and_inkling(self):
+    def test_config_component_id_reads_the_exe_not_the_flags(self):
         self.assertEqual(updater._config_component_id({
             "exe": "component:strata-engine",
             "args": ["--pack", "/tmp/pack", "--max-context", "32768"],
         }), ec.COMPONENT_ID)
         self.assertEqual(updater._config_component_id({
-            "exe": "component:strata-hy4",
-            "arch": "hy4flash",
-            "args": ["--native", "Hy4-Flash-SQ-64.strata", "--engram", "Hy4-Flash-Engram-Q8.strata"],
-        }), "strata-hy4")
-        # Even if a legacy Hy4 config had a plain exe path or missing arch, --engram routes it to strata-hy4
+            "exe": "component:strata-q4-lite",
+            "args": ["--native", "m.gguf"],
+        }), "strata-q4-lite")
+        # #6589: a config that names the general engine is the general engine's; its arguments never make it another component
         self.assertEqual(updater._config_component_id({
             "exe": "/opt/strata/strata",
-            "args": ["--native", "Hy4-Flash-SQ-64.strata", "--engram", "Hy4-Flash-Engram-Q8.strata"],
-        }), "strata-hy4")
-        self.assertEqual(updater._config_component_id({
-            "exe": "component:strata-inkling",
-            "arch": "inkling2_loop",
-            "args": ["--native", "Inkling-2-Mini-SQ-15.strata", "--dspark", "dspark.gguf"],
-        }), "strata-inkling")
-        self.assertTrue(updater._is_shape_engine_config({"args": ["--engram", "x.strata"]}))
-        self.assertTrue(updater._is_shape_engine_config({"args": ["--dspark", "d.gguf"]}))
+            "args": ["--native", "m.gguf", "--engram", "e.gguf"],
+        }), ec.COMPONENT_ID)
+        self.assertEqual(updater._config_component_id({"exe": "/x/strata-q4-lite.exe", "args": ["--native", "m"]}), "strata-q4-lite")
+        self.assertTrue(updater._is_shape_engine_config({"exe": "component:strata-q4-lite"}))
+        self.assertFalse(updater._is_shape_engine_config({"args": ["--engram", "x.strata"]}))     # a flag alone names no component
+        self.assertFalse(updater._is_shape_engine_config({"args": ["--dspark", "d.gguf"]}))
         self.assertFalse(updater._is_shape_engine_config({"exe": "component:strata-engine", "args": ["--pack", "p"]}))
 
     def test_discover_run_config_filters_by_component_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             qwen_cfg = root / "strata-qwen.json"
-            hy4_cfg = root / "strata-hy4-flash-sq-64.json"
-            ink_cfg = root / "strata-inkling-2-mini-sq-15.json"
+            shape_cfg = root / "strata-q4-lite.json"
             qwen_cfg.write_text(json.dumps({"exe": "component:strata-engine", "args": ["--pack", "p"]}), encoding="utf-8")
-            hy4_cfg.write_text(json.dumps({"exe": "component:strata-hy4", "arch": "hy4flash", "args": ["--engram", "e.strata"]}), encoding="utf-8")
-            ink_cfg.write_text(json.dumps({"exe": "component:strata-inkling", "arch": "inkling2_loop", "args": ["--dspark", "d.gguf"]}), encoding="utf-8")
+            shape_cfg.write_text(json.dumps({"exe": "component:strata-q4-lite", "args": ["--native", "m.gguf"]}), encoding="utf-8")
 
             fake_listed = {
                 "models": [
-                    {"id": "hy4-flash-sq-64", "component_status": "present", "source_config": str(hy4_cfg)},
-                    {"id": "inkling-2-mini-sq-15", "component_status": "present", "source_config": str(ink_cfg)},
+                    {"id": "q4-lite", "component_status": "present", "source_config": str(shape_cfg)},
                     {"id": "qwen-iq2_xs", "component_status": "present", "source_config": str(qwen_cfg)},
                 ]
             }
             with mock.patch("strata_control.models.list_installed", return_value=fake_listed), \
                  mock.patch("strata_control.profiles.list_profiles", return_value=[]):
                 self.assertEqual(updater.discover_run_config(component_id=ec.COMPONENT_ID), qwen_cfg)
-                self.assertEqual(updater.discover_run_config(component_id="strata-hy4"), hy4_cfg)
-                self.assertEqual(updater.discover_run_config(component_id="strata-inkling"), ink_cfg)
+                self.assertEqual(updater.discover_run_config(component_id="strata-q4-lite"), shape_cfg)
+                self.assertIsNone(updater.discover_run_config(component_id="strata-not-installed"))
 
-    def test_default_test_start_falls_back_to_binary_smoke_when_only_hy4_config_exists(self):
+    def test_default_test_start_falls_back_to_binary_smoke_when_only_a_shape_config_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            hy4_cfg = root / "strata-hy4-flash-sq-64.json"
-            hy4_cfg.write_text(json.dumps({
-                "exe": "component:strata-hy4",
-                "arch": "hy4flash",
-                "args": ["--native", "Hy4-Flash-SQ-64.strata", "--engram", "Hy4-Flash-Engram-Q8.strata"],
+            shape_cfg = root / "strata-q4-lite.json"
+            shape_cfg.write_text(json.dumps({
+                "exe": "component:strata-q4-lite",
+                "args": ["--native", "m.gguf"],
             }), encoding="utf-8")
             comp = mock.MagicMock(spec=ec.EngineComponent)
             comp.id = ec.COMPONENT_ID
@@ -169,7 +161,7 @@ class UpdaterSmokeComponentRoutingTests(unittest.TestCase):
                 trusted=[],
                 hardware={},
                 components=root / "components",
-                run_config=hy4_cfg,
+                run_config=shape_cfg,
                 allow_no_model_smoke=True,
             )
             with mock.patch.object(updater, "discover_run_config", return_value=None), \

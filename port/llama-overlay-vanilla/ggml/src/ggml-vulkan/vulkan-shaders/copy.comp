@@ -1,0 +1,36 @@
+#version 450
+
+#include "types.glsl"
+#include "generic_unary_head.glsl"
+
+layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    const uint idx = get_idx();
+
+    if (idx >= p.ne) {
+        return;
+    }
+
+    // Loop-invariant: a tensor base offset in elements.
+    const uint a_off = get_aoffset();
+
+#if defined(DST_CONTIGUOUS)
+    // The destination is contiguous, so the four-dimensional expansion is only needed for the source: half the index
+    // arithmetic for a kernel whose whole body is one element move.
+    const uint dst_off = get_doffset() + idx;
+#else
+    const uint dst_off = get_doffset() + dst_idx(idx);
+#endif
+
+#if defined(DATA_A_BF16)
+    data_d[dst_off] = D_TYPE(bf16_to_fp32(uint32_t(data_a[a_off + src0_idx(idx)])));
+#elif defined(DATA_D_BF16)
+    float f = float(data_a[a_off + src0_idx(idx)]);
+    data_d[dst_off] = D_TYPE(fp32_to_bf16(f));
+#elif !defined(OPTIMIZATION_ERROR_WORKAROUND)
+    data_d[dst_off] = D_TYPE(data_a[a_off + src0_idx(idx)]);
+#else
+    data_d[dst_off] = data_a[a_off + src0_idx(idx)];
+#endif
+}

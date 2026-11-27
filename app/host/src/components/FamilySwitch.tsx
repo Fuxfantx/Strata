@@ -3,6 +3,7 @@ import { tr } from '../lib/i18n';
 import type { CatalogModel } from '../lib/native-catalog';
 import { FloatingMenu } from './FloatingMenu';
 import { Icon } from './ui';
+import { BrandMark } from './BrandMark';
 
 /**
  * The model family in the Models navbar: its icon, its name and a chevron. Opening it lists the families of the catalog (Qwen3.8-Flash-Next,
@@ -17,7 +18,7 @@ export function FamilySwitch({ families, selected, onPick }: { families: Catalog
   const current = shown.find(f => f.family === selected) ?? shown[0];
   return <>
     <button ref={trigger} type="button" className="family-trigger" aria-haspopup="menu" aria-expanded={open} aria-label={tr("Model family")} onClick={() => setOpen(v => !v)}>
-      <Icon name="models" size={20}/><strong>{tr(current.title)}</strong><Icon name="chevron" size={16} className="family-trigger__chev"/>
+      <BrandMark family={current.family} size={20}/><strong>{tr(current.title)}</strong><Icon name="chevron" size={16} className="family-trigger__chev"/>
     </button>
     {tr(open ? <FloatingMenu anchor={trigger.current} title={tr("Model family")} width={320} onClose={() => setOpen(false)}>
       <FamilyMenuList shown={shown} missing={missing} current={current} onPick={f => { setOpen(false); if (f.family !== current.family) onPick(f); }}/>
@@ -30,7 +31,7 @@ export function FamilyMenuList({ shown, missing, current, onPick }: { shown: Cat
   return (
     <div className="family-menu">
       {shown.map(f => <button key={f.family} type="button" role="menuitemradio" aria-checked={f.family === current.family} className="family-menu__item" onClick={() => onPick(f)}>
-        <Icon name="models" size={18}/><span><strong>{tr(f.title)}</strong>{f.experimental ? <small>{tr("Experimental")}</small> : null}{f.available === false && f.unavailable_reason ? <small>{f.unavailable_reason}</small> : null}</span>
+        <BrandMark family={f.family} size={18}/><span><strong>{tr(f.title)}</strong>{f.experimental ? <small>{tr("Experimental")}</small> : null}{f.available === false && f.unavailable_reason ? <small>{f.unavailable_reason}</small> : null}</span>
         {f.family === current.family ? <Icon name="check" size={16} className="family-menu__check"/> : null}
       </button>)}
       {missing.map(f => <div key={f.family} className="family-menu__item" role="note" aria-disabled="true"><Icon name="models" size={18}/><span><strong>{f.title}</strong><small>{f.unavailable_reason}</small></span></div>)}

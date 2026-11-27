@@ -1,0 +1,321 @@
+#version 450
+
+// latent_moe_f32q8 - the latent block for one token per workgroup, with typed tensors.
+//
+//   xl[g] = D[g] @ x                       D: one Q8_0 row per (group, latent) pair
+//   h     = silu(gate_s @ xl[g_s]) * (up_s @ xl[g_s])
+//   y_s   = down_s @ h                     down: latent rows over the expert width
+//   out  += w_s * (U[g_s] @ y_s)           U: one Q8_0 row per (group, embd) pair
+//
+// One workgroup owns one token, so every output row is written by exactly one workgroup: no atomics, no cross-workgroup
+// ordering.  The shared arrays are sized to the largest geometry this port accepts (latent 2048, n_ff 1024) because a
+// pipeline is created once per device; the actual widths arrive in the push constants and bound every loop.  A model
+// wider than these limits is refused by the host, not silently truncated.
+//
+// This variant implements F32 expert weights and Q8_0 D/U rows.  The pack's Q3_K and IQ4_NL paths are separate
+// variants; until they exist the host does not claim support for them.
+
+#extension GL_EXT_control_flow_attributes : require
+
+// LMOE_STAGE: 0 = interface only, 1 = + D projection, 2 = + gate/up, 3 = + down, 4 = the whole block.  The variants
+// exist to locate a fault on one device without editing this file between builds; the shipped pipeline is stage 4.
+#ifndef LMOE_STAGE
+#define LMOE_STAGE 4
+#endif
+
+#define MAX_LATENT 2048u
+#define MAX_NFF    1024u
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding = 0) readonly buffer Cur   { float cur[];   };
+layout(binding = 1) readonly buffer Dw    { uint  dw[];    };
+layout(binding = 2) readonly buffer Uw    { uint  uw[];    };
+layout(binding = 3) readonly buffer Gate  { uint  gate[];  };
+layout(binding = 4) readonly buffer Up    { uint  up[];    };
+layout(binding = 5) readonly buffer Down  { uint  down[];  };
+layout(binding = 6) readonly buffer Lab   { uint  lab[];   };
+layout(binding = 7) readonly buffer Ids   { uint  ids[];   };
+layout(binding = 8) readonly buffer Wgt   { float wgt[];   };
+layout(binding = 9) buffer       Out     { float outv[];  };
+layout(binding = 10) buffer      Scr     { float scr[];    };   // xl, [NG * LATENT]
+
+struct params_t {
+    uint n_embd;
+    uint n_tokens;
+    uint n_used;
+    uint latent;
+    uint n_ff;
+    uint n_groups;
+    uint gu_type;        // 0 = f32, 1 = the pack's Q3_K, 2 = the same read out of one blob
+    uint dn_type;        // 0 = f32, 1 = the pack's IQ4_NL, 2 = the same read out of one blob
+    uint blob_bytes;     // one expert's [gate | up | down] in bytes
+    uint gu_row_bytes;
+    uint dn_row_bytes;
+    uint slot_range;     // low 16 bits = first slot, high 16 = one past the last
+};
+layout(push_constant) uniform params { params_t P; };
+
+shared float act[MAX_LATENT];
+shared float hid[MAX_NFF];
+shared float yv[MAX_LATENT];
+
+// IEEE half: value = (1 + man/1024) * 2^(exp-15), written as (1024 + man) * 2^(exp-25) so the mantissa stays an
+// integer; subnormals are man * 2^-24.  The first version used 512 for the hidden bit and -24 for the exponent, which
+// halved every scale.
+float half_to_float(uint h) {
+    const uint sign = (h >> 15) & 1u;
+    const uint exp  = (h >> 10) & 0x1Fu;
+    const uint man  = h & 0x3FFu;
+    float v;
+    if (exp == 0u) {
+        v = float(man) * exp2(-24.0);
+    } else {
+        v = float(1024u + man) * exp2(float(int(exp) - 25));
+    }
+    return sign != 0u ? -v : v;
+}
+
+// a 16-bit value at an arbitrary byte offset: a Q8_0 row is 34 bytes, so every other row's scale starts on an odd
+// half-word and a plain `word & 0xFFFF` reads the neighbouring row's bytes
+
+
+// buffer selector: 0 = gate, 1 = up, 2 = down, 3 = d, 4 = u
+uint at_word(uint wb, uint binding) {
+    if (binding == 5u) { return gate[wb]; }   // the blob: gate, up and down live in this one buffer
+    if (binding == 0u) { return gate[wb]; }
+    if (binding == 1u) { return up[wb]; }
+    if (binding == 2u) { return down[wb]; }
+    if (binding == 3u) { return dw[wb]; }
+    return uw[wb];
+}
+
+// 32 bits at an arbitrary byte offset.  A Q3_K block is 110 bytes, so every other block starts at a byte that is not a
+// multiple of four; masking the offset read the wrong four bytes and every scale of those blocks came out wrong.
+uint at32(uint byte, uint binding) {
+    const uint wb = byte / 4u;
+    const uint sh = 8u * (byte % 4u);
+    const uint w0 = at_word(wb, binding);
+    if (sh == 0u) {
+        return w0;
+    }
+    const uint w1 = at_word(wb + 1u, binding);
+    return (w0 >> sh) | (w1 << (32u - sh));
+}
+
+// one byte, and two bytes little-endian, at arbitrary offsets.  These must not go through at32: a byte read that also
+// shifts by the offset would shift twice, which is the mistake the unaligned fix first made.
+uint u8_at(uint byte, uint binding) {
+    return (at_word(byte / 4u, binding) >> (8u * (byte % 4u))) & 0xFFu;
+}
+
+uint u16_at(uint byte, uint binding) {
+    return u8_at(byte, binding) | (u8_at(byte + 1u, binding) << 8);
+}
+
+float half_at(uint byte, uint binding) {
+    const uint w = at32(byte, binding);
+    return half_to_float((byte % 4u) == 0u ? (w & 0xFFFFu) : (w >> 16));
+}
+
+// Q3_K, translated from ggml's dequantize_row_q3_K: 256 values per 110-byte block {hmask[32] qs[64] scales[12] d}
+float q3k_at(uint base, uint k, uint binding) {
+    const uint bb    = base + (k / 256u) * 110u;
+    const float dall = half_to_float(u16_at(bb + 108u, binding));
+
+    const uint a0raw = at32(bb + 96u, binding);
+    const uint a1raw = at32(bb + 100u, binding);
+    const uint tmp   = at32(bb + 104u, binding);
+    const uint km1 = 0x03030303u;
+    const uint km2 = 0x0f0f0f0fu;
+    const uint a0 = (a0raw & km2) | (((tmp >>  0) & km1) << 4);
+    const uint a1 = (a1raw & km2) | (((tmp >>  2) & km1) << 4);
+    const uint a2 = ((a0raw >> 4) & km2) | (((tmp >> 4) & km1) << 4);
+    const uint a3 = ((a1raw >> 4) & km2) | (((tmp >> 6) & km1) << 4);
+
+    const uint n  = k % 256u;
+    const uint sb = n / 16u;                 // 16 sub-blocks
+    // the four unpacked words hold four scales each, so the WORD is sb/4 and the byte inside it is sb%4; the first
+    // version indexed the word by sb itself, which gave every sub-block above 3 the wrong scale
+    const uint widx = sb / 4u;
+    const uint packed = widx == 0u ? a0 : (widx == 1u ? a1 : (widx == 2u ? a2 : a3));
+    const int  sc = int((packed >> (8u * (sb % 4u))) & 0xFFu);
+    const float dl = dall * float(sc - 32);
+
+    const uint hgrp = n / 128u;               // two 128-value halves
+    const uint m    = n % 128u;
+    const uint j    = m / 32u;                // four 32-value groups per half
+    const uint l    = m % 32u;
+
+    // qs: 64 bytes at bb; inside a half, values l<16 come from q[l] and l>=16 from q[l+16]
+    // qs starts AFTER the 32-byte hmask; reading it from bb read the hmask bytes as quantised values, which made
+    // every gate projection wrong in a way that looked like an index rotation
+    const uint qbyte = bb + 32u + hgrp * 32u + (l % 16u) + (l >= 16u ? 16u : 0u);
+    const uint qbits = u8_at(qbyte, binding);
+    const uint q2    = (qbits >> (2u * j)) & 3u;
+
+    // hmask: 32 bytes at bb, one BYTE per value position and one BIT per 32-value group - so the byte is indexed by the
+    // position and the bit by j + 4*half.  The first draft indexed the byte by the bit position instead, which read the
+    // wrong mask entirely (the Python check in port/tools/q3k-check.py is what found it).
+    const uint hbyte = bb + (l % 16u) + (l >= 16u ? 16u : 0u);
+    const uint hbits = u8_at(hbyte, binding);
+    const uint hbit  = (hbits >> (j + 4u * hgrp)) & 1u;
+
+    return dl * float(int(q2) - (hbit != 0u ? 0 : 4));
+}
+
+// IQ4_NL: 32 values per 18-byte block {half d; uint8 qs[16]}, values from the format's own table
+const int IQ4NL[16] = { -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113 };
+
+float iq4nl_at(uint base, uint k, uint binding) {
+    const uint bb   = base + (k / 32u) * 18u;
+    const float d   = half_to_float(u16_at(bb, binding));
+    const uint n    = k % 32u;
+    const uint qb   = bb + 2u + (n % 16u);
+    const uint bits = u8_at(qb, binding);
+    const uint code = n < 16u ? (bits & 0x0Fu) : ((bits >> 4) & 0x0Fu);
+    return d * float(IQ4NL[code]);
+}
+
+// one read, three layouts: `base` is an element index for F32 and a byte offset for the quantised types.  The type
+// comes from the push constants, so a build cannot silently select the wrong path.
+float expert_at(uint which, uint base, uint k) {
+    if (which < 2u) {
+        if (P.gu_type != 0u) {
+            // in blob mode all three sections are the same buffer, so the section is chosen by the offset, not the binding
+            return q3k_at(base, k, P.gu_type == 2u ? 5u : which);
+        }
+        return uintBitsToFloat(which == 0u ? gate[base + k] : (P.gu_type == 2u ? gate[base + k] : up[base + k]));
+    }
+    if (P.dn_type != 0u) {
+        return iq4nl_at(base, k, P.dn_type == 2u ? 5u : 2u);
+    }
+    return uintBitsToFloat(P.dn_type == 2u ? gate[base + k] : down[base + k]);
+}
+
+
+// Q8_0: blocks of 34 bytes {half d; int8 q[32]}; `base` is the row's first BYTE, because 34 bytes is not a whole
+// number of words and a word-based stride truncates
+float q8_at(uint base, uint k, bool use_u) {
+    const uint byte = base + (k / 32u) * 34u;
+    const float d = half_to_float(u16_at(byte, use_u ? 4u : 3u));
+    const uint q_at = byte + 2u + (k % 32u);
+    const uint qw = use_u ? uw[q_at / 4u] : dw[q_at / 4u];
+    const uint b = (qw >> (8u * (q_at % 4u))) & 0xFFu;
+    const int v = int(b) - (b > 127u ? 256 : 0);
+    return d * float(v);
+}
+
+
+// ---- expert weight types ---------------------------------------------------------------------------------------
+// The pack stores gate/up as Q3_K and down as IQ4_NL; the fixture uses F32.  Both are compiled as variants of this
+// one source, so the inner loops have no type test left in them.
+#ifndef GU_Q3K
+#define GU_Q3K 0
+#endif
+#ifndef DN_IQ4NL
+#define DN_IQ4NL 0
+#endif
+
+void main() {
+    const uint t = gl_WorkGroupID.x;
+    if (t >= P.n_tokens) {
+        return;
+    }
+    const uint tid = gl_LocalInvocationID.x;
+    const uint nth = gl_WorkGroupSize.x;
+    const uint n_embd = P.n_embd;
+    const uint latent = P.latent;
+    const uint n_ff   = P.n_ff;
+    const uint ng     = P.n_groups;
+
+#if LMOE_STAGE >= 1
+    const uint d_row_bytes = (n_embd / 32u) * 34u;
+    for (uint i = tid; i < ng * latent; i += nth) {
+        const uint g = i / latent;
+        const uint r = i % latent;
+        const uint base = (g * latent + r) * d_row_bytes;
+        float acc = 0.0;
+        for (uint k = 0; k < n_embd; ++k) {
+            acc += q8_at(base, k, false) * cur[t * n_embd + k];
+        }
+        scr[i] = acc;
+    }
+#endif
+    barrier();
+
+    for (uint r = tid; r < n_embd; r += nth) {
+        outv[t * n_embd + r] = 0.0;
+    }
+    barrier();
+
+    return;   // BISECT A: D projection only
+
+    const uint u_row_bytes = (latent / 32u) * 34u;
+
+
+
+
+
+
+#if LMOE_STAGE >= 2
+    const uint slot_begin = P.slot_range & 0xFFFFu;
+    const uint slot_end   = (P.slot_range >> 16) & 0xFFFFu;
+    for (uint s = slot_begin; s < slot_end; ++s) {
+        const uint e = ids[t * P.n_used + s];
+        const uint g = lab[e];
+        const float w = wgt[t * P.n_used + s];
+
+        for (uint r = tid; r < latent; r += nth) {
+            act[r] = scr[g * latent + r];
+        }
+        barrier();
+
+        for (uint r = tid; r < n_ff; r += nth) {
+            // three layouts behind one expression: F32 elements, typed Q3_K rows, and the same rows inside one
+            // per-expert blob where gate, up and down follow each other
+            const uint gate_off = P.gu_type == 2u ? e * P.blob_bytes + r * P.gu_row_bytes
+                              : (P.gu_type == 1u ? (e * n_ff + r) * P.gu_row_bytes : e * n_ff * latent + r * latent);
+            const uint up_off   = P.gu_type == 2u ? e * P.blob_bytes + n_ff * P.gu_row_bytes + r * P.gu_row_bytes
+                                                  : gate_off;
+            float ag = 0.0;
+            float au = 0.0;
+            for (uint k = 0; k < latent; ++k) {
+                const float x = act[k];
+                ag += expert_at(0u, gate_off, k) * x;
+                au += expert_at(1u, up_off, k) * x;
+            }
+            hid[r] = (ag / (1.0 + exp(-ag))) * au;
+        }
+        barrier();
+
+#if LMOE_STAGE >= 3
+        for (uint r = tid; r < latent; r += nth) {
+            // the down base has to follow the same three layouts as the gate above: a compile-time switch here left the
+            // blob form reading the typed row offsets, which is why only the blob path was wrong on the device
+            const uint base = P.dn_type == 2u
+                ? e * P.blob_bytes + 2u * n_ff * P.gu_row_bytes + r * P.dn_row_bytes
+                : (P.dn_type == 1u ? (e * latent + r) * P.dn_row_bytes : e * latent * n_ff + r * n_ff);
+            float acc = 0.0;
+            for (uint k = 0; k < n_ff; ++k) {
+                acc += expert_at(2u, base, k) * hid[k];
+            }
+            yv[r] = acc;
+        }
+        barrier();
+#endif
+
+#if LMOE_STAGE >= 4
+        for (uint r = tid; r < n_embd; r += nth) {
+            const uint base = (g * n_embd + r) * u_row_bytes;
+            float acc = 0.0;
+            for (uint k = 0; k < latent; ++k) {
+                acc += q8_at(base, k, true) * yv[k];
+            }
+            outv[t * n_embd + r] += w * acc;
+        }
+#endif
+        barrier();
+    }
+#endif
+}

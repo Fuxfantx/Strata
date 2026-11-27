@@ -74,7 +74,7 @@ test('absent, malformed or unknown saved KV stays absent without aliases or a de
 
 test('ordinary KV metadata requires a matching Qwen3.8 catalog family',async()=>{
  for(const family of ['qwen','swift','coder','unsloth','gyro'])assert.equal((await installedKv({args:['--kv','k8v4']},{family})).kv,'k8v4');
- for(const family of ['qwen36','deepseek41','nvfp4','unknown'])assert.equal(Object.hasOwn(await installedKv({args:['--kv','k8v4']},{family}),'kv'),false);
+ for(const family of ['qwen36','deepseek41','unknown'])assert.equal(Object.hasOwn(await installedKv({args:['--kv','k8v4']},{family}),'kv'),false);
  assert.equal(Object.hasOwn(await installedKv({args:['--kv','k8v4']},{listed:false}),'kv'),false);
  for(const arch of ['qwen35moe','deepseek41'])assert.equal(Object.hasOwn(await installedKv({arch,args:['--kv','k8v4']}),'kv'),false);
 });

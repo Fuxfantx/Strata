@@ -492,11 +492,11 @@ SLOT_RESERVE_MIB = 700       # the engine's default --vram-reserve-mib
 DEFAULT_CONTEXT = 131072     # --max-context when the arguments name none (the 128K default)
 
 #: model families (strata launch --family) the drafter was trained for and measured on: Qwen3.8-Flash-Next, its Gyro build and Unsloth's quantizations of the same weights
-#: (UD-IQ4_XS, UD-Q4_K_XL...; DFlash2 numbers measured on UD-Q4_K_XL on Strix, R9700 and M5 Max). Not Swift (UkisAI's fine-tune), Coder (ISTA-DASLab's coding version) or NVFP4:
+#: (UD-IQ4_XS, UD-Q4_K_XL...; DFlash2 numbers measured on UD-Q4_K_XL on Strix, R9700 and M5 Max). Not Swift (UkisAI's fine-tune) or Coder (ISTA-DASLab's coding version):
 #: no DFlash2 acceptance numbers for them, they start the MTP.
 SUPPORTED_FAMILIES = ("qwen", "gyro", "unsloth")
 #: The model_name setup.py (and metal/setup_mac.py) write: f"{family name}-{model.lower()}": qwen3.8-flash-next-iq3_s, qwen3.8-flash-next-gyro-gyro-s,
-#: qwen3.8-flash-next-unsloth-ud-q4_k_xl. (Coder is qwen3.8-flash-next-coder-iq1_m, NVFP4 qwen3.8-flash-next-nvfp4-nvfp4: neither matches.) Mirrored in
+#: qwen3.8-flash-next-unsloth-ud-q4_k_xl. (Coder is qwen3.8-flash-next-coder-iq1_m: it does not match.) Mirrored in
 #: app/host/server/native-settings.mjs; tests/drafting.test.mjs keeps the two the same.
 _SUPPORTED_NAME = re.compile(r"^qwen3\.8-flash-next(-gyro-[a-z0-9._-]+|-unsloth-[a-z0-9._-]+|-(q|iq|tq)\d[a-z0-9_.]*)?$", re.IGNORECASE)
 
@@ -527,8 +527,8 @@ TARGET_ARCH = "qwen4exp"                                    # general.architectu
 PACK_TARGET = {"hidden": 2560, "vocab": 248320, "taps": (5, 15, 25, 35, 45)}
 #: The model name a file that fits is treated as (the plain family name: no quantization, so no per-quantization table entry applies).
 FILE_FITS_AS = "qwen3.8-flash-next"
-#: Names the DFlash2 exclusions above stand for (Coder, NVFP4, Swift): a file under such a name stays out whatever its header says.
-_EXCLUDED_NAME = re.compile(r"coder|nvfp4|swift", re.IGNORECASE)
+#: Names the DFlash2 exclusions above stand for (Coder, Swift): a file under such a name stays out whatever its header says.
+_EXCLUDED_NAME = re.compile(r"coder|swift", re.IGNORECASE)
 _GGUF_HEAD = 1 << 20                                        # bytes of a GGUF read for its header (the keys are in the first few KB; the vocabulary's words are never read)
 _PACK_HEAD = 1 << 16
 _GGUF_SCALAR = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
@@ -596,7 +596,7 @@ def gguf_facts(path: Any) -> dict[str, Any] | None:
     return facts if facts["arch"] else None
 
 
-#: The model_name setup writes for a set of each family (setup.py's family names): f"{name}-{model.lower()}". Coder, Swift and NVFP4 are left out on purpose (no DFlash2 numbers).
+#: The model_name setup writes for a set of each family (setup.py's family names): f"{name}-{model.lower()}". Coder and Swift are left out on purpose (no DFlash2 numbers).
 _SET_NAME_PREFIX = {"qwen": "qwen3.8-flash-next", "unsloth": "qwen3.8-flash-next-unsloth", "gyro": "qwen3.8-flash-next-gyro"}
 _known_names: dict[tuple[str, int, int], str | None] = {}
 
@@ -1098,7 +1098,7 @@ _NATIVE_TOTAL = re.compile(r"\bn_expert (\d+), total (\d+)")
 
 
 def pack_slot_mib(args: list[Any]) -> float:
-    """MiB of one engine slot for the pack ``--pack`` names. A native-experts pack (Unsloth, i-quant, NVFP4) gives its expert bytes in the first line of
+    """MiB of one engine slot for the pack ``--pack`` names. A native-experts pack (Unsloth, i-quant) gives its expert bytes in the first line of
     native_experts.txt, over n_expert per layer and one line per layer: UD-Q4_K_XL is 77,017,907,200 bytes over 512 x 48, 2.99 MiB a slot, as its engine
     logs it ("expert cache 2710 slots, 7.90 GiB" on a 16 GB card). The ISTA-DASLab i-quant packs have the file too: IQ3_S 1.952 MiB (SLOT_MIB, the set the
     steps were measured on), IQ3_XXS 1.665 MiB. A pack without the file (the canonical Q2_0 pack), or no --pack, is priced at SLOT_MIB.
@@ -1726,11 +1726,11 @@ def apply(cfg: dict[str, Any], *, klass: str = "other", data_dir: str | Path | N
     name = cfg.get("model_name")
     fit = ""
     if not supported_model(name, family):
-        # the name is not one setup writes: what the FILE is decides (a renamed Flash-Next file, a hand-written config, a feed model under its own name); Coder, NVFP4 and Swift stay out by name
+        # the name is not one setup writes: what the FILE is decides (a renamed Flash-Next file, a hand-written config, a feed model under its own name); Coder and Swift stay out by name
         fit = file_fit(args, data_dir) if family is None and not _EXCLUDED_NAME.search(str(name or "")) else ""
         if fit == "fits":
             name = known_name_of_file(args) or FILE_FITS_AS        # a file that is exactly a known set gets that set's table entry; any other the general defaults
-    if not supported_model(name, family, named=normalize(cfg.get("drafting")) == "dflash2"):     # another model: its drafting is not this choice's business (Swift, NVFP4, Qwen3.6, the Coder under Auto...)
+    if not supported_model(name, family, named=normalize(cfg.get("drafting")) == "dflash2"):     # another model: its drafting is not this choice's business (Swift, Qwen3.6, the Coder under Auto...)
         asked = normalize(cfg.get("drafting"))
         if asked == "off" or cfg.get("mtp") is False:            # no drafter for this model (its draft layer is off, or a feed model whose entry says drafter: none): say so, start none
             # "mtp": false: the server's own draft-layer step takes the layer out (and says so); "drafting": "off" alone: taken out here

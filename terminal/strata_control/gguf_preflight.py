@@ -12,7 +12,7 @@ import struct
 from pathlib import Path
 
 from strata_control.profiles import ProfileError
-from tools.gguf_reader import BLOCK_GEOMETRY, GGML_TYPES
+from tools.gguf_reader import BLOCK_GEOMETRY, GGML_TYPES, type_tables
 
 
 MAX_HEADER_BYTES = 64 * 1024 * 1024
@@ -22,7 +22,7 @@ MAX_ARRAY_ITEMS = 500_000
 MAX_TENSORS = 100_000
 SCALAR_BYTES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1,
                 10: 8, 11: 8, 12: 8}
-CAPTURE_STRINGS = {"general.architecture", "tokenizer.ggml.model", "clip.projector_type"}
+CAPTURE_STRINGS = {"general.architecture", "tokenizer.ggml.model", "clip.projector_type", "hy4f.layout_version"}
 PRESENCE_KEYS = {"tokenizer.ggml.tokens", "tokenizer.ggml.merges"}
 
 
@@ -244,6 +244,9 @@ def inspect_metadata(path: Path) -> dict:
             if type(alignment) is not int or not 1 <= alignment <= 4096 or \
                     alignment & (alignment - 1):
                 raise ProfileError("GGUF tensor alignment is invalid", 5)
+            # some families reuse block-type ids that other families also use, so which reading applies is decided by the
+            # architecture the file declares, exactly as the engine does when it loads one
+            type_names, block_geometry = type_tables(found.get("general.architecture"))
             tensor_types: dict[str, int] = {}
             expert_types: dict[str, int] = {}
             required_payload_bytes = 0
@@ -262,8 +265,8 @@ def inspect_metadata(path: Path) -> dict:
                         raise ProfileError("GGUF tensor shape is invalid", 5)
                     elements *= size
                 type_id, offset = reader.u32(), reader.u64()
-                type_name = GGML_TYPES.get(type_id)
-                geometry = BLOCK_GEOMETRY.get(type_name) if type_name else None
+                type_name = type_names.get(type_id)
+                geometry = block_geometry.get(type_name) if type_name else None
                 if geometry is None or elements % geometry[0]:
                     raise ProfileError("GGUF tensor has an unsupported encoding or shape", 5)
                 if offset % alignment:
@@ -284,6 +287,7 @@ def inspect_metadata(path: Path) -> dict:
                 raise ProfileError("single-tensor GGUF shard has unexplained trailing bytes", 5)
             return {"architecture": found.get("general.architecture"),
                     "projector_type": found.get("clip.projector_type"),
+                    "layout_version": found.get("hy4f.layout_version"),
                     "tokenizer_model": found.get("tokenizer.ggml.model"),
                     "tokenizer_tokens_present": found.get("tokenizer.ggml.tokens") is True,
                     "tokenizer_merges_present": found.get("tokenizer.ggml.merges") is True,

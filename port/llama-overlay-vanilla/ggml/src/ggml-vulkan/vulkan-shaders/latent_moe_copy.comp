@@ -1,0 +1,29 @@
+#version 450
+
+// latent_moe_copy - the plumbing probe for GGML_OP_LATENT_MOE.
+//
+// It copies the op's activation into its output and nothing else.  Its only job is to prove the meta entry, the
+// pipeline, the descriptor set, the push constants and the dispatch, so that when the real kernel lands a mismatch
+// means arithmetic and not wiring (port/docs/features/LATENT-MOE.md, "How this kernel gets landed").
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding = 0) readonly buffer Src { float src[]; };
+layout(binding = 1) buffer       Dst { float dst[]; };
+
+struct params_t {
+    uint KX;
+    uint KY;
+    float p1;
+    float p2;
+    float p3;
+    float p4;
+};
+layout(push_constant) uniform params { params_t P; };
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x;
+    if (i < P.KX) {
+        dst[i] = src[i];
+    }
+}

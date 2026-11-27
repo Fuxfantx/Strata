@@ -14,7 +14,7 @@ Codex CLI is the first client.  What it needs, and what this does:
     as a `tool_search_call`; the tools the client then finds are declared in that search's tool result, so the
     prompt before it (the tool list included) stays as it was and the conversation cache holds;
   * reasoning items: the model's thinking is returned as `reasoning_text` content (no summaries: this model does not
-    write them, see docs/DETAILS.md) and, when `include` asks for `reasoning.encrypted_content`, also as an opaque
+    write them) and, when `include` asks for `reasoning.encrypted_content`, also as an opaque
     `encrypted_content` string (base64, not encrypted: the client already holds the text).  Either form sent back is
     put into the conversation again, so the prompt matches what the model wrote and the cache is reused;
   * the official event order: response.created, response.in_progress, response.output_item.added, deltas,
@@ -31,7 +31,7 @@ import re
 import time
 import uuid
 
-from serve.frontend import Event, _late_system_to_user, _name_tool_results, _parts_of, cut_arguments, declared_parameters, effort_kwargs
+from serve.frontend import Event, _late_system_to_user, _parts_of, cut_arguments, declared_parameters, effort_kwargs
 
 ENCRYPTED_PREFIX = "strata.r1:"                   # our own reasoning replay strings; others' are ignored
 HOSTED_TOOLS = ("web_search", "web_search_preview", "file_search", "computer_use_preview", "computer_use",
@@ -332,8 +332,7 @@ def input_messages(req: dict) -> list[dict]:
 def _order_tool_results(messages):
     """The template places tool results by position: each run of tool messages is put in the order of the calls of
     the assistant turn before it (a client may send the results in the order they finished), then the private call
-    ids are dropped (Inkling: after each result has been given the name of its call, #7051)."""
-    _name_tool_results(messages)
+    ids are dropped."""
     i = 0
     while i < len(messages):
         if messages[i]["role"] != "tool":
@@ -633,7 +632,7 @@ def check_request(req: dict) -> None:
         raise ResponsesError("stored prompt templates are not supported: send instructions and input",
                              "prompt", "unsupported_parameter")
     n = req.get("max_output_tokens")
-    # -1 and 0 mean no cap, as max_tokens does on the chat path (docs/DETAILS.md); anything lower is a mistake
+    # -1 and 0 mean no cap, as max_tokens does on the chat path; anything lower is a mistake
     # (a whole number sent as a float, 4096.0, is one: some clients write their JSON numbers that way, #4037)
     if n is not None and (isinstance(n, bool) or not isinstance(n, (int, float)) or n < -1 or
                           (isinstance(n, float) and not n.is_integer())):

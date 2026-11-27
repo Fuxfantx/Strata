@@ -13,7 +13,6 @@ Also supplied by Niko on 10 October 2026:
 
 - `skills.svg` and `engine.svg` from `skillsandengineicon.zip`: Skills navigation,
   skill rows, Engine navigation, and Auto-tune.
-- `family-qwen.svg` from `qwenicon.zip`: Qwen model family, chat model picker,
   reasoning menu, and the loaded model chip. Other families keep the generic
   model library icon.
 

@@ -1,4 +1,4 @@
-/** Pass 2 GUI regression tests: #6680 Hy4-Flash reasoning_effort clamp, #6668 QuestionCard usability, #6661 shutdown chat-save drain. */
+/** Pass 2 GUI regression tests: #6668 QuestionCard usability, #6661 shutdown chat-save drain. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -9,8 +9,6 @@ import { join } from 'node:path';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
-import { buildProfile, connectionReasoningEfforts, effortOf, HY4_LOCAL_EFFORTS, INKLING_LOCAL_EFFORTS, LOCAL_EFFORTS } from '../server/agent/profile.mjs';
-import { clampHy4Effort, shapeBody } from '../server/agent/llm-shape.mjs';
 import { parseQuestions, buildAnswer } from '../server/agent/user-questions.mjs';
 import { createChatStore, drainChatStore, realIo } from '../server/chat-store.mjs';
 
@@ -30,45 +28,6 @@ const bundleTs = async rel => {
   });
   return import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
 };
-
-test('#6680 Hy4-Flash effort clamping never emits xhigh and Inkling-2-Mini thinks like the other local models (0.2.21)', () => {
-  assert.equal(clampHy4Effort('xhigh'), 'max');
-  assert.equal(clampHy4Effort('max'), 'max');
-  assert.equal(clampHy4Effort('high'), 'high');
-  assert.equal(clampHy4Effort('medium'), 'high');
-  assert.equal(clampHy4Effort('low'), 'high');
-  assert.equal(clampHy4Effort('none'), 'no_think');
-  assert.equal(clampHy4Effort('off'), 'no_think');
-  assert.equal(effortOf('xhigh'), 'max');
-
-  const shapedTop = shapeBody({ model: 'hy4-flash-sq-64', reasoning_effort: 'xhigh', messages: [] }, { nativeAgent: true });
-  assert.equal(shapedTop.reasoning_effort, 'max');
-
-  const shapedCtk = shapeBody({ model: 'hy4-flash-sq-64', chat_template_kwargs: { enable_thinking: true, reasoning_effort: 'xhigh' }, messages: [] });
-  assert.equal(shapedCtk.chat_template_kwargs.reasoning_effort, 'max');
-
-  const shapedRenamed = shapeBody({ model: 'my-custom-hy4', chat_template_kwargs: { enable_thinking: true, reasoning_effort: 'xhigh' }, messages: [] }, { hy4: true });
-  assert.equal(shapedRenamed.chat_template_kwargs.reasoning_effort, 'max');
-
-  const built = buildProfile({
-    local: [
-      { id: 'h-renamed', modelId: 'custom-sq-64', arch: 'hy4flash', label: 'My Hy4', baseUrl: 'http://127.0.0.1:9101/v1', context: 131072 },
-      { id: 'ink-renamed', modelId: 'custom-ink', arch: 'inkling2_loop', label: 'My Inkling', baseUrl: 'http://127.0.0.1:9102/v1', context: 32768 },
-    ],
-    connections: [],
-  });
-  const rows = JSON.parse(built.patch.slice(built.patch.indexOf('[')));
-  const providers = rows.find(e => e.id === 'llm-pi-ai').config.providers;
-  assert.deepEqual(providers['strata-local'].models[0].reasoningEfforts, HY4_LOCAL_EFFORTS);
-  assert.equal(providers['strata-local-ink-renamed'].models[0].reasoning, true);
-  assert.deepEqual(providers['strata-local-ink-renamed'].models[0].reasoningEfforts, INKLING_LOCAL_EFFORTS);
-  assert.equal(INKLING_LOCAL_EFFORTS.max, 'max');
-  assert.equal(INKLING_LOCAL_EFFORTS.off, null);
-  assert.equal(providers['strata-local-ink-renamed'].compat.thinkingFormat, 'chat-template');
-
-  assert.deepEqual(connectionReasoningEfforts({ protocol: 'openai-chat', reasoningFormat: 'strata' }, { id: 'hy4-flash-sq-64', reasoning: true }), HY4_LOCAL_EFFORTS);
-  assert.equal(connectionReasoningEfforts({ protocol: 'openai-chat', reasoningFormat: 'strata' }, { id: 'inkling-2-mini-sq-20', reasoning: true }), LOCAL_EFFORTS);
-});
 
 test('#6668 QuestionCard data layer supports >4 questions, string/numeric multiSelect, duplicate ids/labels, and combined option+note', async () => {
   const { readAsk, answerComplete, answeredCount, toAnswers } = await bundleTs('../src/lib/agent-ask.ts');

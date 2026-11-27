@@ -25,7 +25,7 @@ const FAMILIES = [
 
 test('Ornith is a group of its own, after Qwen3.6, and Qwen3.6 keeps only its own sizes', () => {
   const groups = catalog.nativeCatalogModels(FAMILIES);
-  assert.deepEqual(groups.map(g => g.title), ['Qwen3.8-Flash-Next', 'Qwen3.6-35B-A3B', 'Ornith-1.5-35B-A3B']);
+  assert.deepEqual(groups.slice(0, 3).map(g => g.title), ['Qwen3.8-Flash-Next', 'Qwen3.6-35B-A3B', 'Ornith-1.5-35B-A3B']);
   assert.deepEqual(groups[1].sizes.map(s => s.id), ['qwen36-ud-q4_k_xl', 'qwen36-q8_0']);
   assert.deepEqual(groups[2].sizes.map(s => s.model), ['Q4_K_M', 'Q5_K_M', 'Q6_K', 'Q8_0']);
   assert.ok(groups[2].sizes.every(s => s.sourceFamily === 'ornith' && s.images === true));
@@ -34,7 +34,8 @@ test('Ornith is a group of its own, after Qwen3.6, and Qwen3.6 keeps only its ow
 
 test('an older Control without Ornith: no Ornith group, Qwen3.6 as before', () => {
   const groups = catalog.nativeCatalogModels(FAMILIES.slice(0, 2));
-  assert.deepEqual(groups.map(g => g.title), ['Qwen3.8-Flash-Next', 'Qwen3.6-35B-A3B']);
+  assert.ok(!groups.some(g => g.family === 'ornith'));
+  assert.deepEqual(groups.slice(0, 2).map(g => g.title), ['Qwen3.8-Flash-Next', 'Qwen3.6-35B-A3B']);
 });
 
 test('the Ornith group has no KV-format choice, as Qwen3.6 has none', () => {

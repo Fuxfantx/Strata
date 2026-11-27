@@ -363,7 +363,7 @@ class Container(unittest.TestCase):
                 self.assertTrue(np.array_equal(np.asarray(a.data).view(np.uint8), np.asarray(b.data).view(np.uint8)), a.name)
 
     def test_the_slim_copy_loop_is_the_same(self):
-        """tools/nvfp4_local_pack.py cmd_slim: every KV and every tensor of a file copied through reader + writer"""
+        """The pack preparation's slim step: every KV and every tensor of a file copied through reader + writer"""
         with tmpdir() as d:
             src = Path(d) / "src.gguf"
             write_sample(SG, src)

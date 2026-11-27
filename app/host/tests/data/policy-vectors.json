@@ -1763,11 +1763,6 @@
    "family": "coder",
    "supported": false,
    "named": true
-  },
-  {
-   "family": "nvfp4",
-   "supported": false,
-   "named": false
   }
  ]
 }

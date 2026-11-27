@@ -2,7 +2,7 @@
 <MetalPerformancePrimitives/...> (a header only macOS 26 ships) and ends the process when a library does not build.
 
 Control starts the engine with STRATA_METAL_PROMPT=window, STRATA_METAL_PROMPT_GEMM=0 and COOP_K4=0 on macOS below 26 for whatever of the three the
-person has not set, with one line saying why.  Inkling and Hy4 are left alone.  The last class pins, from the engine's own source, the reading that
+person has not set, with one line saying why.  The last class pins, from the engine's own source, the reading that
 makes the three settings enough: every library that holds an MPP kernel is compiled only behind one of them.
 """
 from __future__ import annotations
@@ -138,14 +138,6 @@ class ServerStart(unittest.TestCase):
             env, said = self.child({"backend": "metal", "exe": "/x/strata"}, ver)
             for n in NAMES:
                 self.assertNotIn(n, env, ver)
-            self.assertEqual(said, "")
-
-    def test_inkling_and_hy4_are_left_alone(self):
-        for cfg in ({"backend": "metal", "exe": "/x/strata-inkling"}, {"backend": "metal", "arch": "inkling2_loop"},
-                    {"backend": "metal", "exe": "/x/strata-hy4"}, {"backend": "metal", "arch": "hy4flash"}):
-            env, said = self.child(cfg, "15.8.3")
-            for n in NAMES:
-                self.assertNotIn(n, env, cfg)
             self.assertEqual(said, "")
 
     def test_other_platforms_and_backends_are_untouched(self):

@@ -78,7 +78,7 @@ WHAT WE TESTED AND WHAT WE DID NOT
 ----------------------------------
 * NOT TESTED by us on any RDNA3 card (RX 7000 series): we have no such card. The engine and the libraries inside contain code for gfx1100, gfx1101 and
   gfx1102 (we checked the files), but this packaged build has never run on real hardware. Earlier engines built from source were run by community
-  members on an RX 7900 XTX and an RX 7800 XT (see docs/AMD_HIP.md in the Strata repository), which is why we expect it to work. Expect problems; every
+  members on an RX 7900 XTX and an RX 7800 XT (in the Strata repository), which is why we expect it to work. Expect problems; every
   report helps. This is the most important thing to know.
 * The same program was tested on an RDNA4 card (AMD Radeon AI PRO R9700) under Ubuntu 24.04: it loads a model, answers, runs tool calls and stops cleanly.
   The RDNA3 code is the same source compiled for your card.

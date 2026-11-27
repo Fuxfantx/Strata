@@ -18,18 +18,15 @@ test('#6469 withPromptCacheSpread / withoutPromptCacheSpread toggle the flag cle
   assert.deepEqual(withoutPromptCacheSpread(['--kv', 'int8']), ['--kv', 'int8']);
 });
 
-test('#6469 prompt_cache_spread is a validated native setting known by run-config-check and hidden for Hy4/Inkling', () => {
+test('#6469 prompt_cache_spread is a validated native setting known by run-config-check', () => {
   const field = NATIVE_FIELDS.find(f => f.id === 'prompt_cache_spread');
   assert.ok(field && field.type === 'boolean');
   assert.deepEqual(validateNativeSettings({ prompt_cache_spread: true }), { prompt_cache_spread: true });
   assert.deepEqual(validateNativeSettings({ prompt_cache_spread: false }), { prompt_cache_spread: false });
   assert.equal(checkRunConfig(JSON.stringify({ exe: 'e', tokenizer: 't', args: [], prompt_cache_spread: true })).issues.length, 0);
-  const ui = read('src/components/NativeSettings.tsx');
-  assert.match(ui, /HY4_HIDDEN_FIELDS = new Set\(\[[^\]]*'prompt_cache_spread'/);
-  assert.match(ui, /INKLING_HIDDEN_FIELDS = new Set\(\[[^\]]*'prompt_cache_spread'/);
 });
 
-test('#6469 desktop packaged mode enables --prompt-cache-spread by default for Flash-Next/Gyro, honours off override, and skips Hy4/Inkling', async t => {
+test('#6469 desktop packaged mode enables --prompt-cache-spread by default for Flash-Next/Gyro and honours off override', async t => {
   const root = mkdtempSync(join(tmpdir(), 'strata-pcs-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const dataDir = join(root, 'data');
@@ -39,9 +36,7 @@ test('#6469 desktop packaged mode enables --prompt-cache-spread by default for F
   writeFileSync(join(dataDir, 'native-host.json'), JSON.stringify({ installDir }));
 
   const gyroPath = join(installDir, 'strata-gyro_s.json');
-  const hy4Path = join(installDir, 'strata-hy4.json');
   writeFileSync(gyroPath, JSON.stringify({ exe: 'component:strata-engine', tokenizer: 't', args: ['--kv', 'int8', '--prompt-cache', '6'] }));
-  writeFileSync(hy4Path, JSON.stringify({ exe: 'component:strata-hy4', arch: 'hy4flash', tokenizer: 't', args: ['--kv', 'int8'] }));
 
   const launchedConfigs = [];
   const spawnFakeMcp = () => {
@@ -74,7 +69,6 @@ test('#6469 desktop packaged mode enables --prompt-cache-spread by default for F
       install_dir: installDir,
       models: [
         { id: 'gyro_s', name: 'Gyro-S', source_config: gyroPath, component_status: 'present', context_tokens: 131072, backend: 'hip' },
-        { id: 'hy4', name: 'Hy4-Flash', source_config: hy4Path, component_status: 'present', context_tokens: 131072, backend: 'cuda' },
       ],
     }),
     engine: async () => ({ usable: true, backend: 'hip', engine: { version: '0.1.65', platform: 'win', backend: 'hip', root: join(root, 'eng') } }),
@@ -107,18 +101,13 @@ test('#6469 desktop packaged mode enables --prompt-cache-spread by default for F
   assert.equal(j1.state, 'done', j1.error);
   assert.ok(launchedConfigs.at(-1).args.includes('--prompt-cache-spread'), 'Gyro-S gets --prompt-cache-spread by default');
 
-  // 2. Hy4-Flash never gets --prompt-cache-spread
-  const j2 = await finish(native.operation('load', { model: 'hy4' }).id);
-  assert.equal(j2.state, 'done', j2.error);
-  assert.ok(!launchedConfigs.at(-1).args.includes('--prompt-cache-spread'), 'Hy4-Flash does not get --prompt-cache-spread');
-
-  // 3. Turning the global setting off removes it from subsequent loads
+  // 2. Turning the global setting off removes it from subsequent loads
   assert.deepEqual(native.savePromptCacheSpread(false), { enabled: false, customized: true });
   const j3 = await finish(native.operation('load', { model: 'gyro_s' }).id);
   assert.equal(j3.state, 'done', j3.error);
   assert.ok(!launchedConfigs.at(-1).args.includes('--prompt-cache-spread'), 'disabled global setting omits --prompt-cache-spread');
 
-  // 4. Per-model override true still enables it even when global is off
+  // 3. Per-model override true still enables it even when global is off
   native.save('gyro_s', { values: { prompt_cache_spread: true } });
   const j4 = await finish(native.operation('load', { model: 'gyro_s' }).id);
   assert.equal(j4.state, 'done', j4.error);

@@ -5,9 +5,8 @@
  *   node scripts/audit-ui.mjs
  *
  * Static checks over the app's own stylesheet and the synced kit copy. Everything
- * it asserts is a rule from src/styles/app.css's header comment or
- * docs/interaction-guidelines.md, so a failure means one of those documents and
- * the code disagree.
+ * it asserts is a rule from src/styles/app.css's header comment, so a failure means
+ * that document and the code disagree.
  *
  * Exits non-zero when anything fails, so it can gate a release.
  */

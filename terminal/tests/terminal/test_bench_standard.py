@@ -1,4 +1,4 @@
-"""The standard benchmark (docs/BENCHMARK_PROTOCOL.md) against a scripted mock server: no engine, no model weights."""
+"""The standard benchmark against a scripted mock server: no engine, no model weights."""
 
 from __future__ import annotations
 
@@ -287,14 +287,6 @@ class FixtureTests(unittest.TestCase):
 
 class DocsAndPackagingTests(unittest.TestCase):
     ROOT = Path(__file__).resolve().parents[2]
-
-    def test_the_protocol_names_the_frozen_bundle(self):
-        text = (self.ROOT.parent / "docs" / "BENCHMARK_PROTOCOL.md").read_text(encoding="utf-8")
-        self.assertIn(bs.load_corpus().sha256, text)
-        self.assertIn(bs.PROTOCOL_ID, text)
-        for heading in ("## Run it", "## Submit and review", "## Activation checklist", "### Where the numbers come from"):
-            self.assertIn(heading, text)
-        self.assertNotIn("do not implement this protocol", text)
 
     def test_the_terminal_archive_carries_the_fixtures(self):
         import sys

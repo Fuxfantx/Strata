@@ -14,6 +14,11 @@ from unittest import mock
 
 import pytest
 
+# tools/ holds two kinds of file: the pytest modules (test_*.py, what `tools/check` runs) and hand-run scripts whose names end in
+# _test.py (park_skip_test.py, batch_test.py, ...). The scripts do their work at import (park_skip_test.py parses argv, exits 2),
+# so pytest's default *_test.py pattern would abort collection; only test_*.py is a test module here.
+collect_ignore_glob = ["*_test.py"]
+
 LINUX_VIEW = ("setup", "strata_mcp")
 
 

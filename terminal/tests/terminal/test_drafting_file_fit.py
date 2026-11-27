@@ -131,8 +131,8 @@ class ARenamedFileAtStart(unittest.TestCase):
             with mock.patch.object(drafting, "file_fit", side_effect=AssertionError("the file is not read")):
                 self.assertEqual(drafting.apply(cfg, data_dir=data, backend="cuda", archs=["sm_120"]).drafter, "dflash2")
 
-    def test_coder_nvfp4_and_swift_stay_out_whatever_the_file_says(self):
-        for name in ("qwen3.8-flash-next-coder-iq1_m", "qwen3.8-flash-next-nvfp4-nvfp4", "swift-1.5-iq2_xs", "My-Coder-copy"):
+    def test_coder_and_swift_stay_out_whatever_the_file_says(self):
+        for name in ("qwen3.8-flash-next-coder-iq1_m", "swift-1.5-iq2_xs", "My-Coder-copy"):
             for mode in (None, "auto"):
                 with tempfile.TemporaryDirectory() as tmp:
                     cfg, data = self.config(tmp, name, gguf_header(), mode)

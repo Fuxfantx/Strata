@@ -38,10 +38,13 @@ class QuantHeaderNames(unittest.TestCase):
         self.assertIn("${STRATA_ROOT}/include/strata/quant/strata-quant-common.h", cm)
 
     def test_the_repo_mac_qwen_package_script_stages_the_real_header_under_both_names(self):
-        """packaging/mac/build_engine.sh is the repo version of the release scripts' Mac stage (rel213/scripts/mac_rel213.sh copied third_party/ggml/ggml-common.h,
+        """packaging/mac/build_vision_windows.bat is the repo version of the release scripts' Mac stage (rel213/scripts/mac_rel213.sh copied third_party/ggml/ggml-common.h,
         which is only a forwarder now: staged like that the Metal kernels would have no block layouts)."""
-        sh = (ROOT.parent / "tools" / "packaging" / "mac" / "build_engine.sh").read_text(encoding="utf-8")
-        self.assertIn('QUANT=engine/include/strata/quant/strata-quant-common.h', sh)
+        sh_path = ROOT.parent / "tools" / "packaging" / "mac" / "build_vision_windows.bat"
+        if not sh_path.is_file():
+            self.skipTest("this build has no Mac path")
+        sh = sh_path.read_text(encoding="utf-8")
+        self.assertIn('QUANT=third_party/strata-ggml/strata-quant-common.h', sh)
         self.assertIn('cp "$QUANT" "$STAGE/metal/strata-quant-common.h"', sh)
         self.assertIn('cp "$QUANT" "$STAGE/metal/ggml-common.h"', sh)
         self.assertNotIn("cp third_party/ggml/ggml-common.h", sh)

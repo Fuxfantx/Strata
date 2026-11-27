@@ -713,7 +713,7 @@ class WholeMarkNeedsThePin(unittest.TestCase):
         self.assertTrue(setup.done(shard))
 
     def test_a_family_with_no_hf_folder_keeps_the_mark_and_does_not_raise(self):
-        """The NVFP4 families have no "hf" key (they download a file list): the helper must not need one (it raised KeyError in main())."""
+        """A family that names no "hf" folder (its own download layout): the helper must not need one (it raised KeyError in main())."""
         shard = self.folder / self.name
         shard.write_bytes(b"x")
         setup.mark_whole_unless_pinned([shard], None, own=False)

@@ -1,4 +1,4 @@
-"""What a standard benchmark report says about the machine, the build, the model and the settings (docs/BENCHMARK_PROTOCOL.md).
+"""What a standard benchmark report says about the machine, the build, the model and the settings.
 
 Every probe is best effort and local: it reads the inference host's own tools (nvidia-smi, rocm-smi, amd-smi, PowerShell, /proc, sysctl) and the
 server's answers. A fact that cannot be read becomes `None` with a reason in `Why`, never a guess. Nothing here changes the machine.
@@ -499,7 +499,7 @@ def software(why: Why, machine: dict, *, engine_version: str | None, build_optio
 
 
 # ------------------------------------------------------------------------------------------------------------ model
-QUANT = re.compile(r"(?i)(?:^|[-_.])((?:UD-)?(?:IQ\d_[A-Z]+|Q\d_[A-Z0-9_]+|Q\d_K(?:_[A-Z]+)?|IQ\d_?[A-Z]*|BF16|F16|NVFP4|Q\d))(?=[-_.]|$)")
+QUANT = re.compile(r"(?i)(?:^|[-_.])((?:UD-)?(?:IQ\d_[A-Z]+|Q\d_[A-Z0-9_]+|Q\d_K(?:_[A-Z]+)?|IQ\d_?[A-Z]*|BF16|F16|Q\d))(?=[-_.]|$)")
 SHARD = re.compile(r"^(.*)-(\d{5})-of-(\d{5})(\.gguf)$")
 
 

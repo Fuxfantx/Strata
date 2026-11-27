@@ -266,7 +266,7 @@ test('#3723 Context memory has one line per format, from the documented memory f
   const models = src('components/NativeModels.tsx');
   assert.match(models, /KV_CHOICES\.map\(c => \(\{ value: c\.value, label: c\.label, title: c\.hint \}\)\)/);
   for (const text of ['INT8 is the standard: good quality and a medium amount of memory.', 'Q4 uses about half the memory of INT8, but is less precise on very long documents.', 'K8 / V4 uses about a quarter less memory than INT8 and is more precise than Q4. Prompts are 2 to 5% slower.']) assert.ok(models.includes(text), text);
-  // The figures are the ones of docs/DETAILS.md and of native-fit.ts: q4_0 576 and k8v4 816 against int8 1056 bytes per token and layer.
+  // The figures are the ones of native-fit.ts: q4_0 576 and k8v4 816 against int8 1056 bytes per token and layer.
   const fit = src('lib/native-fit.ts');
   assert.match(fit, /int8: 1056, q4_0: 576, k8v4: 816/);
   assert.ok(Math.abs(576 / 1056 - 0.55) < 0.06 && Math.abs(1 - 816 / 1056 - 0.23) < 0.01);

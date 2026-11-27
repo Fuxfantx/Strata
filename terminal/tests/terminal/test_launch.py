@@ -112,7 +112,10 @@ class CatalogRules(unittest.TestCase):
             own = cat.strata.own_families()                # #5869: Qwen3.6's sizes are its own table's (a size name can repeat across families)
             sizes = {(f["family"], s["model"]): s for f in cat.strata.model_table(cat.hardware()) for s in f["sizes"]}
             for r in rows:
-                want = sizes[(r.family, r.model)]["download_gb"] if r.family in own else models[r.model]["download_gb"]
+                if r.model in models and r.family not in own and "edge0" not in r.family:
+                    want = models[r.model]["download_gb"]
+                else:                                              # own-path and pack families (Edge0): their sizes are their own table's
+                    want = sizes[(r.family, r.model)]["download_gb"]
                 self.assertAlmostEqual(r.download_gb, want)
             rec = [r for r in rows if r.recommended]
             self.assertEqual([(r.family, r.model) for r in rec], [("qwen", "IQ3_S")])      # 64 + 12 GB: the 64 GB tier
@@ -146,9 +149,7 @@ class CatalogRules(unittest.TestCase):
             cat = catalog(hw)
             rows = {r.model: r for r in cat.rows()}
             self.assertEqual(set(rows), {"Q2_0", "IQ3_XXS", "IQ3_S", "Gyro-S", "Gyro-M", "UD-IQ1_M",
-                                "UD-Q2_0", "UD-IQ2_XS", "UD-Q2_K_XL", "UD-IQ3_XXS", "UD-Q3_K_XL", "UD-IQ4_XS-v31", "UD-Q4_K_XL", "UD-Q5_K_XL", "UD-Q6_K_XL",
-                                "SQ-64", "SQ-96", "SQ-128",
-                                "SQ-20", "SQ-15", "SQ-10", "GSQ-RCO-IQ3_S"})   # Unsloth's sets + Hy4-Flash + Inkling-2-Mini's offered builds on Mac (UD-Q4_K_XL is both Qwen's Unsloth size and Inkling's); the other Inkling quants are not offered
+                                "UD-Q2_0", "UD-IQ2_XS", "UD-Q2_K_XL", "UD-IQ3_XXS", "UD-Q3_K_XL", "UD-IQ4_XS-v31", "UD-Q4_K_XL", "UD-Q5_K_XL", "UD-Q6_K_XL"})   # Unsloth's sets: the Qwen3.8-Flash-Next families on Mac
             self.assertEqual([r.model for r in rows.values() if r.recommended], ["Q2_0"])
             self.assertEqual((rows["Q2_0"].verdict, rows["Q2_0"].words), ("slower", "may run slower"))
             self.assertEqual(rows["IQ3_S"].verdict, "slower")
@@ -643,9 +644,10 @@ class AdoptRules(unittest.TestCase):
             self.assertIsNone(cfg)
             self.assertTrue(any("prepared pack" in p for p in problems))
             self.assertTrue(any("tokenizer" in p for p in problems))
-            cfg, problems = adopt.plan(family="nvfp4", model="NVFP4", model_dir=m, data_dir=d, src=Path("."), context=8192, kv=None, model_name="x",
+            cfg, problems = adopt.plan(family="qwen36", model="Q4_K_XL", model_dir=m, data_dir=d, src=Path("."), context=8192, kv=None, model_name="x",
                                        family_def={}, log=h.base / "x.log", backend=None)
             self.assertIn("only for the Qwen3.8-Flash-Next", problems[0])
+            self.assertIn("not for qwen36", problems[0])
             self.assertNotIn("..", problems[0] + ".")                           # round 8, N11: the caller adds the full stop
 
     def test_pictures_on_is_setups_yes_and_setup_picks_the_encoder(self):
@@ -735,37 +737,6 @@ class AdoptRules(unittest.TestCase):
             out = r.build_config(installed)
             self.assertEqual(json.loads(out.read_text())["gpu"], 1)
             self.assertEqual(json.loads(installed.read_text())["gpu"], 0)
-
-    def test_inkling_kv_reaches_the_engine_for_a_gguf_and_a_strata_file_and_a_wrong_value_is_said(self):
-        """GRID, 0.2.20: `--kv k8v4` for an Inkling GGUF started with --model-path was accepted and not passed on (the engine arguments had no --kv), so the
-        8-bit comparison ran on the default. The allowed values now reach the engine whatever the file is, and a value the engine does not take is said."""
-        import json
-        from strata_control import tune_knobs
-        for name, native in (("gguf", "Inkling-2-Mini-UD-Q4_K_XL.gguf"), ("strata", "Inkling-2-Mini-SQ-10.strata")):
-            for backend, kv, want in (("cuda", "k8v4", "k8v4"), ("cuda", "k8v8", "k8v8"), ("cuda", "fp8", "fp8"), ("cuda", "fp16", "fp16"),
-                                      ("hip", "fp8", "fp8"), ("hip", "k8v4", "fp8"), ("sycl", "k8v8", "fp8"), ("metal", "fp16", "fp16")):
-                with self.subTest(file=name, backend=backend, kv=kv):
-                    base = {"exe": "component:strata-inkling", "arch": "inkling2_loop", "args": ["--native", f"/m/{native}", "--max-context", "32768"],
-                            **({"backend": backend} if backend != "cuda" else {})}
-                    cfg = derive_config(base, S.LaunchSettings(family="inkling-2-mini", kv=kv), bool_flags=tune_knobs.BOOL_FLAGS)
-                    self.assertEqual(cfg["args"][cfg["args"].index("--kv") + 1], want)
-                    self.assertEqual(cfg["args"].count("--kv"), 1)
-        # a Qwen format is not an Inkling one: nothing is written and the launch says so, in the notices and as a warning
-        self.assertIsNone(S.inkling_kv_note("k8v4", "cuda"))
-        self.assertIsNone(S.inkling_kv_note(None, "hip"))
-        self.assertIn("--kv int8 is not a memory format of Inkling-2-Mini (it takes fp16, fp8, k8v8, k8v4)", S.inkling_kv_note("int8", None))
-        self.assertIn("(it takes fp16, fp8)", S.inkling_kv_note("q4_0", "hip"))
-        self.assertIn("using --kv fp8 instead", S.inkling_kv_note("k8v4", "metal"))
-        with Home() as h:
-            installed = h.base / "strata-inkling-2-mini-sq-10.json"
-            installed.write_text(json.dumps({"exe": "component:strata-inkling", "arch": "inkling2_loop", "port": 8080,
-                                             "args": ["--native", "/m/Inkling-2-Mini-UD-Q4_K_XL.gguf", "--max-context", "32768"]}))
-            for kv, said in (("int8", "is not a memory format of Inkling-2-Mini"), ("k8v4", None)):
-                seen = []
-                r = Runner(S.LaunchSettings(family="inkling-2-mini", model="SQ-10", name="kv", kv=kv), catalog=catalog(HW_12), emit=seen.append)
-                cfg = json.loads(r.build_config(installed).read_text())
-                self.assertEqual("--kv" in cfg["args"], said is None, (kv, cfg["args"]))
-                self.assertEqual(any(said in n for n in r.notices) if said else bool(r.notices and any("--kv" in n for n in r.notices)), said is not None, (kv, r.notices))
 
     def test_a_card_the_installed_model_was_set_to_is_not_replaced_by_the_automatic_pick(self):
         """Two equal cards: the fit rule recommends card 0, so a person's earlier choice (setup --gpu 1, the app's card pick: "gpus_asked")
@@ -949,25 +920,6 @@ class FlagsCommand(unittest.TestCase):
         code, out, err = run_cli(["launch", "--plan", "--mtp", "maybe"])
         self.assertNotEqual(code, 0)
 
-    def test_turbo_flags_are_listed_planned_and_copyable(self):
-        """Owner 2026-11-26: --turbo and --turbo-max are the two opt-in Inkling tail-skip presets; both off unless asked, mapped onto STRATA_INK_TAIL_SKIP."""
-        code, out, err = run_cli(["launch", "--help"])
-        for flag in ("--turbo", "--turbo-max"):
-            self.assertIn(flag, out)
-        self.assertEqual(self.plan("--model", "q2_0")["settings"]["extra"], {})              # off by default
-        for flag, word in (("--turbo", "turbo"), ("--turbo-max", "turbo-max")):
-            p = self.plan("--model", "q2_0", flag)
-            self.assertEqual(p["settings"]["extra"], {"STRATA_INK_TAIL_SKIP": word})
-            self.assertIn(flag, p["flags"])                                                   # the copyable line says what was typed
-            self.assertNotIn("--set STRATA_INK_TAIL_SKIP", p["flags"])
-            self.assertTrue(any("differ slightly from exact" in w for w in p["warnings"]), p["warnings"])
-        # the person's own --set wins over the flag, with a warning
-        p = self.plan("--model", "q2_0", "--turbo", "--set", "STRATA_INK_TAIL_SKIP=thr=0.05")
-        self.assertEqual(p["settings"]["extra"], {"STRATA_INK_TAIL_SKIP": "thr=0.05"})
-        self.assertTrue(any("is ignored" in w for w in p["warnings"]), p["warnings"])
-        code, out, err = run_cli(["launch", "--plan", "--turbo", "--turbo-max"])              # one of the two
-        self.assertNotEqual(code, 0)
-
     def test_vision_help_says_the_picture_rule(self):
         code, out, err = run_cli(["launch", "--help"])
         text = " ".join(out.split())
@@ -1111,7 +1063,7 @@ class FlagsCommand(unittest.TestCase):
         self.assertIn("Did you mean 'Office'", err)
 
     def test_vision_is_turned_off_for_a_model_without_pictures(self):
-        # every catalog model reads pictures now (Gyro and NVFP4-QAD too): a row that does not stands in for a future one
+        # every catalog model reads pictures now (Gyro too): a row that does not stands in for a future one
         import dataclasses
         real_rows = Catalog.rows
 

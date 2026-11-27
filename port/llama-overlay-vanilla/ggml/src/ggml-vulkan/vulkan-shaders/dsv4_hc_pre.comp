@@ -1,0 +1,135 @@
+#version 450
+
+#extension GL_EXT_control_flow_attributes : require
+
+// Collapse the hc residual streams of a token into one, weighted per stream:
+//
+//   dst[i0, it] = scale * sum_ih x[i0, ih, it] * weights[ih, it]
+//
+// GATED (a define, so the two variants are separate binaries) turns weights into a per-element gate
+// [n_embd, hc, n_tokens] applied as sigmoid.
+//
+// HC_PRE_QUAD (also a define) makes an invocation cover four consecutive i0 of one row, so x and dst are float4
+// accesses and the base addresses are computed once.  The host picks the grouping by row count: at decode the op is
+// a single row where the parallelism of one element per invocation is worth more than the wider access.
+
+layout(constant_id = 0) const uint BLOCK_SIZE = 256;
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+#ifndef GATED
+#define GATED 0
+#endif
+
+#if defined(PARAM_BLOCK_ENABLED)
+#define PARAM_BLOCK_BINDING 12
+layout (binding = PARAM_BLOCK_BINDING, std430) readonly buffer parameter
+#else
+layout(push_constant) uniform parameter
+#endif
+{
+    uint n_embd;
+    uint n_tokens;
+
+    uint nbx0; uint nbx1; uint nbx2;   // x
+    uint nbw0; uint nbw1; uint nbw2;   // weights / gate
+    uint nbd0; uint nbd1;              // dst
+
+    uint x_offset;
+    uint w_offset;
+    uint d_offset;
+
+    float scale;
+};
+
+layout(binding = 0, std430) readonly buffer X { float data_x[]; };
+layout(binding = 1, std430) readonly buffer W { float data_w[]; };
+layout(binding = 2, std430) writeonly buffer D { float data_d[]; };
+
+const uint hc = 4;
+
+#if GATED == 0
+shared float w[hc];
+#endif
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint it  = gl_WorkGroupID.y;
+
+#if GATED == 0
+    if (tid < hc) {
+        w[tid] = data_w[w_offset + tid * nbw0 + it * nbw1];
+    }
+    barrier();
+#endif
+
+#ifdef HC_PRE_QUAD
+    const uint i0 = gl_WorkGroupID.x * BLOCK_SIZE * 4u + tid * 4u;
+    if (i0 >= n_embd) {
+        return;
+    }
+    const bool full = i0 + 4u <= n_embd;
+    const uint xb = x_offset + i0 * nbx0 + it * nbx2;
+    const uint wb = w_offset + i0 * nbw0 + it * nbw2;
+    vec4 result = vec4(0.0f);
+    [[unroll]]
+    for (uint ih = 0; ih < hc; ++ih) {
+        const uint xs = xb + ih * nbx1;
+        // The last group of a row that is not a multiple of four reads only the elements that exist.
+        const vec4 xv = full
+            ? vec4(data_x[xs + 0u], data_x[xs + 1u], data_x[xs + 2u], data_x[xs + 3u])
+            : vec4(data_x[xs + 0u],
+                   i0 + 1u < n_embd ? data_x[xs + 1u] : 0.0f,
+                   i0 + 2u < n_embd ? data_x[xs + 2u] : 0.0f,
+                   i0 + 3u < n_embd ? data_x[xs + 3u] : 0.0f);
+        vec4 wv;
+#if GATED == 1
+        const uint ws = wb + ih * nbw1;
+        wv = full
+            ? vec4(1.0f / (1.0f + exp(-data_w[ws + 0u])), 1.0f / (1.0f + exp(-data_w[ws + 1u])),
+                   1.0f / (1.0f + exp(-data_w[ws + 2u])), 1.0f / (1.0f + exp(-data_w[ws + 3u])))
+            : vec4(1.0f / (1.0f + exp(-data_w[ws + 0u])),
+                   i0 + 1u < n_embd ? 1.0f / (1.0f + exp(-data_w[ws + 1u])) : 0.0f,
+                   i0 + 2u < n_embd ? 1.0f / (1.0f + exp(-data_w[ws + 2u])) : 0.0f,
+                   i0 + 3u < n_embd ? 1.0f / (1.0f + exp(-data_w[ws + 3u])) : 0.0f);
+#else
+        wv = vec4(w[ih]);
+#endif
+        result = fma(xv, wv, result);
+    }
+    result = scale * result;
+    const uint db = d_offset + i0 * nbd0 + it * nbd1;
+    if (full) {
+        data_d[db + 0u] = result.x;
+        data_d[db + 1u] = result.y;
+        data_d[db + 2u] = result.z;
+        data_d[db + 3u] = result.w;
+    } else {
+        for (uint k = 0u; k < n_embd - i0; ++k) {
+            data_d[db + k] = result[k];
+        }
+    }
+#else
+    const uint i0 = gl_WorkGroupID.x * BLOCK_SIZE + tid;
+    if (i0 >= n_embd) {
+        return;
+    }
+
+    const uint xb = x_offset + i0 * nbx0 + it * nbx2;
+    const uint wb = w_offset + i0 * nbw0 + it * nbw2;
+
+    float result = 0.0f;
+    [[unroll]]
+    for (uint ih = 0; ih < hc; ++ih) {
+        float wv;
+#if GATED == 1
+        wv = 1.0f / (1.0f + exp(-data_w[wb + ih * nbw1]));
+#else
+        wv = w[ih];
+#endif
+        result = fma(data_x[xb + ih * nbx1], wv, result);
+    }
+
+    data_d[d_offset + i0 * nbd0 + it * nbd1] = scale * result;
+#endif
+}

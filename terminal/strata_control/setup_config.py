@@ -55,7 +55,6 @@ class SetupInputs:
     q4_split: Any = None
     ram: Any = None
     reader: Any = None
-    ready: Any = None
     rope_scale: Any = None
     rt: Any = None
     scaling: Any = None
@@ -133,7 +132,6 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
     mmproj = inp.mmproj
     model = inp.model
     model_args = inp.model_args
-    models_dir = inp.models_dir
     multi = inp.multi
     pack = inp.pack
     ple = inp.ple
@@ -141,7 +139,6 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
     q4_split = inp.q4_split
     ram = inp.ram
     reader = inp.reader
-    ready = inp.ready
     rope_scale = inp.rope_scale
     rt = inp.rt
     scaling = inp.scaling
@@ -192,7 +189,6 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
     parallel_note = lib.parallel_note
     ple_ram_platform_ok = lib.ple_ram_platform_ok
     pool_workers_note = lib.pool_workers_note
-    ready_paths = lib.ready_paths
     recommend_pool_workers = lib.recommend_pool_workers
     recommend_remote_expert_opt = lib.recommend_remote_expert_opt
     resident_budget_gib = lib.resident_budget_gib
@@ -228,28 +224,15 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
         ok(f"low-RAM mode: engine {meta.get('version')} has no resident variant yet; the experts are read through "
            "the OS file cache (run setup again after the next engine update)")
     work_budget, work_asked = None, None               # the app's "Leave 20% for my work" number (the old rule), written beside the budget (setup.work_budget_key)
-    if low_ram and ready:
-        # NVFP4 (68 GB of experts) on a PC whose RAM does not hold them: the RAM-budget mode, as Unsloth's files - the
-        # most-used experts outside VRAM pinned within RAM less 17 GB (24 on a unified-memory GPU), the rest read from experts.bin.
-        # When host RAM is very small (rb <= 0), switch cleanly to GPU+SSD Only (--ssd-experts: bounded 1-2 GiB DMA ring, 0 swap).
-        rb = resident_budget_gib(model, ram, uma=gpu_uma)
-        if rb <= 0:
-            args += ["--ssd-experts"]
-            ok(f"GPU+SSD streaming mode: {model}'s cold experts stream directly from SSD through a bounded pinned DMA ring (0 swap)")
-        else:
-            args += ["--resident-budget-gib", str(rb)]
-            work_budget = resident_budget_gib(model, ram, uma=gpu_uma, work=True)
-            ok(f"low-RAM mode: {rb} GiB of {model}'s experts kept in RAM (the most used), the rest read from the pack's "
-               "experts.bin on the SSD as needed")
-    elif low_ram:   # the experts from the pack's experts.bin: the ones the GPU does not hold copied into RAM, or mapped
+    if low_ram:   # the experts from the pack's experts.bin: the ones the GPU does not hold copied into RAM, or mapped
         args += ["--resident-experts" if resident else "--mmap-experts"]
     elif is_gb10(gpu):
-        # a DGX Spark: the RAM copy of the experts and the GPU's cache are the same memory. Mapped, every expert fits in the cache (NVFP4
-        # on a 128 GB GB10: 24576 of 24576 slots, not 13702; chat decode 44.4 against 40.6 tok/s, 16K prompt 1471 against 1397)
+        # a DGX Spark: the RAM copy of the experts and the GPU's cache are the same memory. Mapped, every expert fits in the cache (the
+        # 4-bit experts on a 128 GB GB10: 24576 of 24576 slots, not 13702; chat decode 44.4 against 40.6 tok/s, 16K prompt 1471 against 1397)
         args += ["--mmap-experts"]
         ok("unified memory: the experts are read from the model files in place (--mmap-experts), so the GPU's cache holds them "
            "instead of a second copy in RAM")
-        # the measured settings of this part (docs/DGX_SPARK_LINUX.md): the 32,768-token prompt chunk (auto's 8,192 measured 2-6% slower
+ # the measured settings of this part : the 32,768-token prompt chunk (auto's 8,192 measured 2-6% slower
         # here); the draft layer as 4-bit copies (+3.5% decode, 3 paired rounds, answers identical: the drafter's proposals are verified
         # by the target); one norm per hyper-connection stream in the draft layer (llama.cpp's graph: acceptance 0.60 -> 0.63, decode +4.3%
         # [1.009, 1.078], 5 of 5 greedy answers identical)
@@ -265,8 +248,8 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
             "and Korean drafts).")
     disk = None if is_wsl() else rotational_disk(ple)  # #605 (WSL's virtual disk says rotational)
     if disk:
-        tensor = None if ready else next((t for t in GGUFFile(ple).tensors if t.name == "per_layer_token_embd.weight"), None)
-        size = ple.stat().st_size if ready else getattr(tensor, "expected_bytes", lambda: None)()
+        tensor = next((t for t in GGUFFile(ple).tensors if t.name == "per_layer_token_embd.weight"), None)
+        size = getattr(tensor, "expected_bytes", lambda: None)()
         table_gb = size / 1e9 if size else 28.8
         if ram >= MODELS[model]["ram_gb"] + table_gb + 4:
             args += ["--ple-io", "ram"]
@@ -284,8 +267,8 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
         # changes.  It costs the table's size in RAM, so only with 16 GB to spare beyond the model's own need; a smaller PC
         # keeps reading from the SSD as before.
         try:
-            tensor = None if ready else next((t for t in GGUFFile(ple).tensors if t.name == "per_layer_token_embd.weight"), None)
-            size = ple.stat().st_size if ready else getattr(tensor, "expected_bytes", lambda: None)()
+            tensor = next((t for t in GGUFFile(ple).tensors if t.name == "per_layer_token_embd.weight"), None)
+            size = getattr(tensor, "expected_bytes", lambda: None)()
         except Exception:
             size = None
         table_gb = size / 1e9 if size else 28.8
@@ -562,7 +545,7 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
         old_cfg = home() / f"strata-{tag.lower()}.json"
         vt = vision_tokens(a.vision_tokens, vision, old_cfg if old_cfg.is_file() else adopted)
         cfg["vision"] = {"exe": str(eng / VEXE), "mmproj": str(mmproj),     # the text model, opened vocab-only:
-                         "model": str(ready_paths(model, models_dir)["dense"] if ready else shards[0]),
+                         "model": str(shards[0]),
                          "gpu": vision == "gpu", "max_tokens": vt}
         if reader is not None:                          # AMD: the HIP reader with the CPU reader behind it, or the CPU reader
             from strata_control import vision_reader as VR

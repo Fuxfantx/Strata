@@ -2,7 +2,7 @@
 
 The preparation tools use Strata's own reader/writer and quantizers (tools/strata_gguf.py, tools/strata_quants.py): gguf_lib() returns it.
 $STRATA_GGUF_PY (a folder that holds llama.cpp's `gguf` package) still selects that package instead, for two releases (the byte-identical
-A/B of the pack tools runs both); llama.cpp's HF converter (NVFP4-local) imports gguf-py itself and always uses the vendored copy.
+A/B of the pack tools runs both); llama.cpp's HF converter imports gguf-py itself and always uses the vendored copy.
 
 Where gguf-py is looked for (gguf_py(), add_gguf_py()), in order: $STRATA_GGUF_PY (a folder that holds the `gguf` package, e.g. <llama.cpp>/gguf-py), then the vendored copy
 <engine>/third_party/strata-gguf-py (frozen at the pinned llama.cpp commit, no download), then the development tree's
@@ -79,7 +79,7 @@ def add_gguf_py() -> None:
 
 
 def converter_dir() -> str:
-    """llama.cpp's Hugging Face converter (convert_hf_to_gguf.py and conversion/), vendored beside gguf-py (the NVFP4-local preparation)."""
+    """llama.cpp's Hugging Face converter (convert_hf_to_gguf.py and conversion/), vendored beside gguf-py (preparing a model from its Hugging Face files)."""
     for c in (_vendored() / "converter", *[d / "third_party" / "strata-gguf-py" / "converter" for d in _install_dirs()]):
         if (c / "convert_hf_to_gguf.py").is_file():
             return str(c)

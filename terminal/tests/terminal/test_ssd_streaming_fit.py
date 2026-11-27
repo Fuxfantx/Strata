@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from strata_control import gpu_fit, hy4_fit, inkling_fit
+from strata_control import gpu_fit
 
 
 class SsdStreamingFitTests(unittest.TestCase):
@@ -28,38 +28,6 @@ class SsdStreamingFitTests(unittest.TestCase):
         self.assertIn("--ssd-experts", p["flags"])
         self.assertLessEqual(p["ram_use_gb"], 8.0)
         self.assertGreater(p["ssd_gb"], 60.0)
-
-    def test_hy4_gpu_ssd_only_and_cpu_ssd_only(self):
-        # 12 GiB GPU + 12 GiB RAM running 72 GB Hy4-Flash SQ-64 -> gpu_ssd_only
-        g = hy4_fit.ssd_mode_flags("SQ-64", vram_gib=12.0, ram_gib=12.0)
-        self.assertEqual(g["tier"], "gpu_ssd_only")
-        self.assertTrue(g["runnable"])
-        self.assertIn("--ssd-experts", g["flags"])
-
-        # No GPU + 16 GiB RAM -> cpu_ssd_only
-        c = hy4_fit.ssd_mode_flags("SQ-64", vram_gib=0.0, ram_gib=16.0)
-        self.assertEqual(c["tier"], "cpu_ssd_only")
-        self.assertTrue(c["runnable"])
-        self.assertIn("--ssd-experts", c["flags"])
-
-    def test_inkling_gpu_ssd_only_and_cpu_ssd_only(self):
-        # 8 GiB GPU + 10 GiB RAM running 20 GB Inkling-2-Mini SQ-20 -> gpu_ssd_only
-        g = inkling_fit.ssd_mode_flags("SQ-20", vram_gib=8.0, ram_gib=10.0)
-        self.assertEqual(g["tier"], "gpu_ssd_only")
-        self.assertTrue(g["runnable"])
-        self.assertIn("--ssd-experts", g["flags"])
-
-        # No GPU + 8 GiB RAM running 20 GB SQ-20 -> cpu_ssd_only
-        c = inkling_fit.ssd_mode_flags("SQ-20", vram_gib=0.0, ram_gib=8.0)
-        self.assertEqual(c["tier"], "cpu_ssd_only")
-        self.assertTrue(c["runnable"])
-        self.assertIn("--cpu", c["flags"])
-        self.assertIn("--ssd-experts", c["flags"])
-
-        # 24 GiB GPU + 32 GiB RAM running SQ-20 -> in_memory
-        ok = inkling_fit.ssd_mode_flags("SQ-20", vram_gib=24.0, ram_gib=32.0)
-        self.assertEqual(ok["tier"], "in_memory")
-        self.assertEqual(ok["flags"], [])
 
 
 if __name__ == "__main__":

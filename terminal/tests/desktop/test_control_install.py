@@ -360,19 +360,6 @@ class InstallerServerTests(unittest.TestCase):
         # not a download once setup prepares the files
         self.assertNotIn("download", self.mcp.combined_progress({"step": "6/7: preparing the model for Strata", "download": {"x": 1}}, job))
 
-    def test_a_pack_with_many_files_reports_the_whole_pack(self):
-        S = self.mcp.Strata(self.root, ROOT).setup_module()
-        files = self.mcp.expected_files(S, "nvfp4", "NVFP4", self.root / "models", False)
-        self.assertGreater(len(files), 5)
-        self.assertTrue(all(f["bytes"] for f in files), "a ready-made pack pins every file's size")
-        big = next(f for f in files if f["path"].endswith("experts.bin"))
-        Path(big["path"]).parent.mkdir(parents=True)
-        Path(big["path"] + ".part").write_bytes(b"x" * 1000)
-        prog = self.mcp.combined_progress({"step": "5/7: downloading"}, {"files": files, "total_gb": 128.0})
-        model = prog["parts"][0]
-        self.assertEqual((model["kind"], model["state"], model["files_done"], model["files_total"]), ("model", "downloading", 0, len(files)))
-        self.assertAlmostEqual(model["total_gb"], sum(f["bytes"] for f in files) / 1e9, places=2)
-
     def test_a_config_with_only_some_parts_is_not_ready(self):
         """The config names the first part only; 'ready' used to mean that part exists."""
         data = self.root / "models" / "x"

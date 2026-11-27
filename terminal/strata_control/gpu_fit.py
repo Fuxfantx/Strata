@@ -9,7 +9,7 @@ The memory arithmetic is native-fit.ts `fitOn` (app/host/src/lib/native-fit.ts) 
 the experts are held first in the graphics memory beyond about DENSE_GB (the dense weights, buffers and a 32K cache), then in RAM beyond
 about SYSTEM_ROOM_GB left for the system; whatever is left would be read from the SSD (`spill_gb`). A split adds the memory of the extra
 cards but every extra card holds its own dense layers and prompt buffers, so each one costs SPLIT_CARD_OVERHEAD_GB of that (an estimate:
-docs/MULTI_GPU.md says each card "holds the dense weights of its layers and its own prompt buffers").
+each card "holds the dense weights of its layers and its own prompt buffers").
 
 Cards that count: not integrated (an iGPU shares the system RAM and is ignored), at least MIN_CARD_GB of graphics memory, flagged usable by
 the caller's own driver checks (NVIDIA RTX 20 or newer, a supported AMD card, ...). A card needs SPLIT_MIN_VRAM_GB to share a model.
@@ -30,7 +30,7 @@ MIN_CARD_GB = 3.5              # admits 4 GB GPUs reporting 3.8-3.9 GiB (GTX 165
 FITS_SPARE_RAM_GB = 4.0        # RAM left beyond the experts below which "fits" becomes "tight"
 SSD_BOUNCE_RING_GB = 1.5       # bounded 1-2 GiB pinned DMA bounce/prefetch ring in RAM for GPU+SSD Only (0 OS swap)
 SSD_MIN_RAM_LRU_GB = 1.0       # minimum bounded RAM LRU cache for CPU+SSD Only streaming
-SPLIT_PROMPT_GAIN = "about 20% faster"   # setup.py's own words for prompts read on two cards (docs/MULTI_GPU.md)
+SPLIT_PROMPT_GAIN = "about 20% faster"   # setup.py's own words for prompts read on two cards
 
 
 def _round1(x: float) -> float:
@@ -241,7 +241,7 @@ def _option(key: str, cards: list[dict], memory_gb: float, ram_gb: float | None)
         words = f"fits: needs {memory_gb:.0f} GB of the {have:.0f} GB available"
     notes = []
     if n >= 2:
-        notes.append(f"prompts are read {SPLIT_PROMPT_GAIN}; the cards share the layers (docs/MULTI_GPU.md)")
+        notes.append(f"prompts are read {SPLIT_PROMPT_GAIN}; the cards share the layers")
         small = [c for c in cards[1:] if float(c.get("vram_gb") or 0) < SPLIT_PROMPT_VRAM_GB - 0.5]
         if small and float(cards[0].get("vram_gb") or 0) >= SPLIT_PROMPT_VRAM_GB - 0.5:
             notes.append(f"{_name(small[0])} is small: it can make prompts slower than the first card alone")

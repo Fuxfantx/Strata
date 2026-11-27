@@ -63,6 +63,30 @@ BLOCK_GEOMETRY: dict[str, tuple[int, int]] = {
     "TQP5": (128, 42), "TQP6": (128, 50), "TQP7": (128, 58),
 }
 
+# Some families write their own block types at ids other families also use, so the tables above are not enough on their own:
+# the file's architecture decides which reading applies.  This mirrors what the engine does when it loads a pack - ids 144 to
+# 150 mean the Hy4 blocks when the architecture says so, and the trellis blocks otherwise.
+# One format: the four block types are codes only, and each quantised tensor has a `<name>.scale` beside it.
+HY4_TYPE_NAMES = {4: "I32", 43: "F8_E4M3", 148: "ENGRAM_Q4B12", 149: "ENGRAM_Q6B12", 150: "ENGRAM_Q2B12",
+                  151: "CSQ8", 152: "CSQ4", 153: "VQ4_128", 154: "VQ4_64"}
+HY4_BLOCK_GEOMETRY = {
+    "I32": (1, 4), "F8_E4M3": (1, 1),
+    "CSQ8": (512, 192), "CSQ4": (512, 128), "VQ4_128": (512, 112), "VQ4_64": (512, 96),
+    "ENGRAM_Q4B12": (96, 56), "ENGRAM_Q6B12": (96, 80), "ENGRAM_Q2B12": (96, 32),
+}
+HY4_ARCHITECTURES = frozenset({"hy_v4", "hy_v4_flash"})
+
+
+def type_tables(architecture: str | None):
+    """Type names and block geometry for a file, chosen by the architecture it declares.
+
+    The default tables are returned for every architecture that is not known to reuse these ids, so a caller can always ask
+    without knowing whether the family is special.
+    """
+    if architecture in HY4_ARCHITECTURES:
+        return {**GGML_TYPES, **HY4_TYPE_NAMES}, {**BLOCK_GEOMETRY, **HY4_BLOCK_GEOMETRY}
+    return GGML_TYPES, BLOCK_GEOMETRY
+
 
 @dataclasses.dataclass
 class TensorInfo:

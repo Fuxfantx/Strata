@@ -15,7 +15,7 @@ from pathlib import Path
 MIN_MACOS = (15, 0)        # MTLResidencySet (the engine keeps every buffer resident through one)
 
 # The Mac's packs.  shard1_gb: the file the GPU maps (resident in unified memory while the model runs); the n-gram
-# table (shard 2, 28.8 GB) is read from the SSD a few rows at a time.  tested: measured on the M5 Max (docs/MAC.md).
+# table (shard 2, 28.8 GB) is read from the SSD a few rows at a time.  tested: measured on the M5 Max.
 # Round 0214: ONE switch for Unsloth's v3.1 sets that have Q5_0 expert downs (UD-IQ2_XS and UD-Q2_K_XL: one layer, UD-Q3_K_XL: 20, the v3.1 UD-IQ4_XS: 33).  The Metal engine
 # has no Q5_0 down kernel yet (moe.metal's DN_SET stops at Q5_1 / Q8_0 / Q2_0 / IQ4_NL), so those four are listed with "missing" (the Terminal's menu leaves them out, --model
 # names them and says so) until the METAL stream lands the kernel and flips this to True.  The other new sets use kernels the Mac has.  UD-IQ1_S needs no entry (never offered).
@@ -39,9 +39,9 @@ MAC_MODELS = {
     "UD-Q4_K_XL": {"shard1_gb": 82.6, "tested": True, "family": "unsloth", "shards": 4},
     "UD-Q5_K_XL": {"shard1_gb": 103.9, "tested": True, "family": "unsloth", "shards": 6},
     "UD-Q6_K_XL": {"shard1_gb": 114.8, "tested": True, "family": "unsloth", "shards": 6},
-    # agentionai's Gyro files (family "gyro", docs/GYRO.md): ONE file with the n-gram table inside (58.5 / 92.0 GB to download);
+    # agentionai's Gyro files (family "gyro"): ONE file with the n-gram table inside (58.5 / 92.0 GB to download);
     # shard1_gb is what the GPU needs of it, without that table (the engine reads the table from the SSD a few rows at a time).
-    # The trellis experts run on the Metal engine from the release that added metal/kernels' TQ types (docs/MAC.md).
+    # The trellis experts run on the Metal engine from the release that added metal/kernels' TQ types.
     "Gyro-S": {"shard1_gb": 29.7, "tested": True, "family": "gyro", "shards": 1, "file_gb": 58.5},
     "Gyro-M": {"shard1_gb": 63.2, "tested": False, "family": "gyro", "shards": 1, "file_gb": 92.0},
 }
@@ -303,7 +303,7 @@ def stream_mtp(stream: bool, ram_gb: float) -> bool:
 
 def engine_args(pack: Path, shards: list, rt: Path, ctx: int, stream: bool = False, ram_gb: float = 0.0,
                 profile: Path | str = "data/expert-profile.bin", model: str = "", family: str = "") -> list[str]:
-    """The Metal defaults: --spec 2 with the MTP draft layer (measured best on the M5 Max, docs/MAC.md) and the Q8_0
+    """The Metal defaults: --spec 2 with the MTP draft layer (measured best on the M5 Max) and the Q8_0
     hyper-connection read (the engine's default on Metal; STRATA_HC_Q8=0 in the config's env gives the exact BF16
     read).  Streaming from the SSD: one token per step, no draft layer (measured faster on the 32 GB M4); a streaming
     Mac with STREAM_MTP_FROM_GB or more keeps the draft layer and uses --spec STREAM_SPEC."""

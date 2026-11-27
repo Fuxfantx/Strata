@@ -1,4 +1,8 @@
+<<<<<<< C:\Users\Fuxfantx\AppData\Local\Temp\strata-merge\threeway\3732224842393058040.ours
 # Generated, not source: deterministic build products of terminal/tools/ (see docs/).
+=======
+# Generated, not source: deterministic build products of tools/.
+>>>>>>> C:\Users\Fuxfantx\AppData\Local\Temp\strata-merge\threeway\3732224842393058040.theirs
 # tiny-qwen4exp.gguf is ~113 MB, over GitHub's 100 MB file limit -- regenerate with
 #   python terminal/tools/make_tiny_model.py
 tools/bench/tiny-*.gguf
@@ -115,8 +119,12 @@ node_modules/
 /app/host/docs/evidence/
 /app/host/docs/checkpoints/
 
+<<<<<<< C:\Users\Fuxfantx\AppData\Local\Temp\strata-merge\threeway\3732224842393058040.ours
 # DGX Spark build outputs and local venv (docs/DGX_SPARK_LINUX.md)
 /terminal/out-spark/
+=======
+# DGX Spark build outputs and local venv
+>>>>>>> C:\Users\Fuxfantx\AppData\Local\Temp\strata-merge\threeway\3732224842393058040.theirs
 /out-spark/
 /terminal/build-spark/
 /build-spark/
@@ -124,3 +132,20 @@ node_modules/
 /build-vision-spark/
 /terminal/.venv-build/
 /.venv-build/
+
+# The port's out-of-tree tooling: RenderDoc (x64, downloaded), the x64 build of it, the python used for the bindings,
+# captures, and the fetched OpenCL headers.  None of it is source.
+/captures/
+/tools/rd/
+/tools/rd-build/
+/tools/rdoc/
+/tools/rdx64/
+/tools/pydeps/
+/tools/build_log*.txt
+/third_party/opencl/
+# the fetched llama.cpp trees (production: third_party/llama.cpp; a leftover of an older pin is not source)
+/third_party/llama.cpp/
+/third_party/llama.cpp.oldpin/
+
+# the encoder's scratch directory (a space-free junction target for TEMP during tests)
+.tmp-encoder/

@@ -1,6 +1,6 @@
 """0221 APPTUI: four things a user saw and could not make sense of (found in the end-to-end pass).
 
-a. `strata launch --plan` for a model with its own engine (Inkling-2-Mini, Hy4-Flash) said nothing of the engine download when none was installed (the
+a. `strata launch --plan` for a model with an engine path of its own (Qwen3.6-35B-A3B) said nothing of the engine download when none was installed (the
    missing-engine error was swallowed and counted as "an engine is here"), and nothing of the free disk.
 b. The picture reader was "on (the reader runs on the processor)" in the plan and "pictures gpu" in the running-server line.
 c. The picture reader's last figure came back as "Downloading the picture reader" after its check.
@@ -34,7 +34,7 @@ class PlanWords(unittest.TestCase):
         self.base = Path(t.name)
 
     def runner(self, **kw) -> Runner:
-        r = Runner(S.LaunchSettings(family="inkling-2-mini", model="SQ-10", vision="off", context=32768, data_dir=str(self.base / "data"), **kw),
+        r = Runner(S.LaunchSettings(family="qwen", model="Q2_0", vision="off", context=32768, data_dir=str(self.base / "data"), **kw),
                    catalog=catalog(HW_12), components_dir=str(self.base / "comp"))
         for p in (mock.patch.object(Runner, "installed_state", lambda self: (None, None)),):
             p.start()
@@ -42,11 +42,11 @@ class PlanWords(unittest.TestCase):
         return r
 
     def test_the_plan_names_the_engine_download_and_the_free_disk(self):
-        with mock.patch.object(Catalog, "disk_free", lambda self, path: 54.0):
+        with mock.patch.object(Catalog, "disk_free", lambda self, path: 90.0):
             plan = self.runner().download_plan()
         self.assertTrue(plan["engine_missing"], plan)
         self.assertIn("The engine for your graphics card is downloaded first", plan["text"])
-        self.assertIn("54 GB are free where it goes", plan["text"])
+        self.assertIn("90 GB are free where it goes", plan["text"])
         self.assertNotIn("Not enough room", plan["text"])
 
     def test_a_drive_that_is_too_small_says_so(self):
@@ -57,7 +57,7 @@ class PlanWords(unittest.TestCase):
 
 
 class DiskBeforeStopping(PlanWords):
-    """Found on the NVIDIA Linux box: `launch --model SQ-15 --restart` stopped the serving SQ-10 first, then setup failed for lack of disk, and nothing served."""
+    """Found on the NVIDIA Linux box: `launch --model <a size> --restart` stopped the serving model first, then setup failed for lack of disk, and nothing served."""
 
     def runner_with_a_server(self, free_gb):
         r = self.runner()
@@ -108,54 +108,6 @@ class PictureWords(unittest.TestCase):
         self.assertFalse(order.stale("verify", full))                # the reader's check
         self.assertTrue(order.stale("pictures", full))               # the same figure again: not news
         self.assertFalse(order.stale("pictures", part))              # a new, partial download line is shown
-
-
-class InklingPictureReader(unittest.TestCase):
-    """GRID: an Unsloth GGUF with mmproj-BF16.gguf beside it. strata-inkling reads only its own Vision.strata (`--info mmproj-BF16.gguf`: "GGUF architecture is
-    'clip', expected 'inkling2'"), so the projector must never be passed as --vision, and a launch with pictures on and no reader fetches the right file or says plainly
-    that images will not work."""
-
-    def test_the_projector_beside_a_gguf_is_not_a_reader(self):
-        import setup
-        with tempfile.TemporaryDirectory() as td:
-            folder, data = Path(td) / "g", Path(td) / "d"
-            folder.mkdir()
-            data.mkdir()
-            (folder / "mmproj-BF16.gguf").write_bytes(b"GGUF")
-            self.assertIsNone(setup.inkling_find_local_vision(folder, data, True))
-            (folder / "Inkling-2-Mini-Vision.strata").write_bytes(b"x")
-            self.assertEqual(setup.inkling_find_local_vision(folder, data, True), folder / "Inkling-2-Mini-Vision.strata")
-
-    def test_adopting_such_a_folder_says_so_and_passes_no_vision(self):
-        from strata_cli.launch import adopt
-        from strata_control import inkling_family
-        from tests.terminal.test_inkling_gguf_import import make_inkling_gguf, write_fake_o200k_files, ROOT
-        with tempfile.TemporaryDirectory() as td:
-            base = Path(td)
-            folder, data = base / "g", base / "d"
-            folder.mkdir()
-            gguf = folder / "Inkling-2-Mini-UD-Q4_K_XL.gguf"
-            gguf.write_bytes(make_inkling_gguf(architecture="inkling2", expert_type=12))
-            (folder / "mmproj-BF16.gguf").write_bytes(b"GGUF")
-            tok = data / "packs" / "inkling-2-mini-ud-q4_k_xl" / "tokenizer"
-            tok.mkdir(parents=True)
-            (tok / "vocab.json").write_text("{}", encoding="utf-8")
-            notes: list[str] = []
-            cfg, problems = adopt.plan(family="inkling-2-mini", model="UD-Q4_K_XL", model_dir=folder, data_dir=data, src=ROOT, context=32768, kv=None,
-                                       model_name="inkling-2-mini-ud-q4_k_xl", family_def={}, log=base / "ink.log", backend="cuda", notes=notes)
-            self.assertEqual(problems, [], problems)
-            self.assertNotIn("--vision", cfg["args"])
-            self.assertTrue(any("mmproj-BF16.gguf beside the model is llama.cpp's picture projector" in n and inkling_family.VISION_FILE in n for n in notes), notes)
-
-    def test_launch_says_the_real_reason_when_the_installed_model_has_no_reader(self):
-        from strata_cli.launch.runner import Runner
-        from strata_control import inkling_family
-        from tests.terminal.launch_support import HW_12, Home, catalog
-        with Home():
-            r = Runner(S.LaunchSettings(family="inkling-2-mini", model="SQ-10", vision="on", context=32768), catalog=catalog(HW_12))
-            r.catalog.strata.describe_config = lambda path: {"images": "off"}
-            r.check_pictures(Path("x.json"))
-        self.assertTrue(any(f"Images will not work: no picture reader file ({inkling_family.VISION_FILE}, 0.64 GB)" in n for n in r.notices), r.notices)
 
 
 class UpdateWords(unittest.TestCase):

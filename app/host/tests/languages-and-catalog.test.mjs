@@ -35,13 +35,13 @@ test('language switching translates static and formatted UI without changing sup
 });
 const size=(id,model)=>({id,model,download_gb:4,ram_needed_gb:8,about:'',installed:false});
 const family=(id,title,images,sizes)=>({family:id,title,images,sizes,about:'',experimental:false});
-test('only the two requested display families exist; engine IDs and per-version capabilities survive grouping',()=>{
+test('the display families are the four the app offers; engine IDs and per-version capabilities survive grouping',()=>{
  setTranslationLanguage('en');
- const raw=[family('qwen','Qwen3.8-Flash-Next',true,[size('q2_0','Q2_0')]),family('swift','Swift 1.5',false,[size('swift-iq2_xs','IQ2_XS')]),family('coder','Coder',false,[size('coder-iq1_m','IQ1_M')]),family('unsloth','Unsloth',true,[size('unsloth-ud-q4_k_xl','UD-Q4_K_XL')])];
- const groups=nativeCatalogModels(raw);assert.deepEqual(groups.map(item=>item.title),['Qwen3.8-Flash-Next','Qwen3.6-35B-A3B']);assert.equal(groups[1].sizes.length,0);
- assert.deepEqual(groups[0].sizes.map(item=>[item.sourceFamily,item.id,item.images]),[['qwen','q2_0',true],['swift','swift-iq2_xs',false],['coder','coder-iq1_m',false],['unsloth','unsloth-ud-q4_k_xl',true]]);
+ const raw=[family('qwen','Qwen3.8-Flash-Next',true,[size('q2_0','Q2_0')]),family('swift','Swift 1.5',false,[size('swift-iq2_xs','IQ2_XS')]),family('coder','Coder',true,[size('coder-iq1_m','IQ1_M')])];
+ const groups=nativeCatalogModels(raw);assert.deepEqual(groups.map(item=>item.title),['Qwen3.8-Flash-Next','Qwen3.6-35B-A3B','Edge0','Hy4 flash']);
+ assert.deepEqual(groups[0].sizes.map(item=>[item.sourceFamily,item.id,item.images]),[['qwen','q2_0',true],['swift','swift-iq2_xs',false],['coder','coder-iq1_m',true]]);
  assert.equal(catalogVersionLabel(groups[0].sizes[1]),'Swift 1.5 · Compact');
- const newer=nativeCatalogModels([...raw,family('qwen36','Qwen3.6-35B-A3B',true,[size('real-36-q4','Q4_K_M')])]);assert.equal(newer[1].sizes[0].id,'real-36-q4');assert.equal(newer[1].sizes[0].sourceFamily,'qwen36');
+ const newer=nativeCatalogModels([...raw,family('qwen36','Qwen3.6-35B-A3B',true,[size('real-36-q4','Q4_K_M')])]);assert.equal(newer[1].sizes[0].id,'real-36-q4');
  assert.deepEqual(nativeCatalogModels([]),[]);
 });
 
@@ -50,10 +50,10 @@ test('a model of the update feed is its own group after the built-in ones; one t
  const fed={...family('qwen4-test','Qwen4 Test',true,[size('qwen4-test-q4_k_m','Q4_K_M')]),feed:true};
  const gone={...family('later-one','Later One',false,[]),feed:true,available:false,unavailable_reason:'not available on this engine'};
  const groups=nativeCatalogModels([family('qwen','Qwen3.8-Flash-Next',true,[size('q2_0','Q2_0')]),fed,gone]);
- assert.deepEqual(groups.map(item=>item.family),['qwen3.8','qwen3.6','qwen4-test','later-one']);
- assert.deepEqual(groups[2].sizes.map(item=>[item.sourceFamily,item.id,item.images]),[['qwen4-test','qwen4-test-q4_k_m',true]]);
- assert.equal(groups[3].sizes.length,0);assert.equal(groups[3].available,false);assert.equal(groups[3].unavailable_reason,'not available on this engine');
- assert.deepEqual(nativeCatalogModels([family('qwen','Qwen3.8-Flash-Next',true,[size('q2_0','Q2_0')])]).map(item=>item.family),['qwen3.8','qwen3.6']);
+ assert.deepEqual(groups.map(item=>item.family),['qwen3.8','qwen3.6','edge0','hy4','qwen4-test','later-one']);
+ assert.deepEqual(groups[4].sizes.map(item=>[item.sourceFamily,item.id,item.images]),[['qwen4-test','qwen4-test-q4_k_m',true]]);
+ assert.equal(groups[5].sizes.length,0);assert.equal(groups[5].available,false);assert.equal(groups[5].unavailable_reason,'not available on this engine');
+ assert.deepEqual(nativeCatalogModels([family('qwen','Qwen3.8-Flash-Next',true,[size('q2_0','Q2_0')])]).map(item=>item.family),['qwen3.8','qwen3.6','edge0','hy4']);
 });
 
 test('the Gyro sizes join the Qwen3.8 group as their own edition, without images',()=>{

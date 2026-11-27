@@ -72,17 +72,11 @@ test("the list writes Fits nowhere; only 'may run slower' is a word", () => {
 });
 
 test("one rule (owner 2026-11-08): the weight files without the lookup table against RAM + VRAM, nothing taken off", () => {
-  // NVFP4: 69 GB of weights. 63.1 GB of RAM and a 11.9 GB card hold 75 GB: it fits, whatever the engine's old RAM-only words said.
-  const nvfp4 = { id: 'nvfp4-nvfp4', download_gb: 128, ram_needed_gb: 80, experts_gb: 68, memory_gb: 69, on_this_pc: 'does not fit' };
-  assert.equal(versionFit(nvfp4, { ram_gb: 63.1, vram_gb: 11.9 }), 'fits');
-  assert.equal(versionFit(nvfp4, { ram_gb: 31, vram_gb: 32 }), 'ssd', 'the V100 32 GB with 31 GB of RAM: 63 GB');
   assert.equal(versionFit({ id: 'u', download_gb: 84, memory_gb: 51.3 }, { ram_gb: 31, vram_gb: 32 }), 'fits', 'UD-IQ3_XXS / IQ3_S there: 51 GB');
   assert.equal(versionFit({ id: 'x', download_gb: 1, memory_gb: 63 }, { ram_gb: 31, vram_gb: 32 }), 'fits', 'exactly as much as there is');
   assert.equal(versionFit({ id: 'x', download_gb: 1, memory_gb: 63.1 }, { ram_gb: 31, vram_gb: 32 }), 'ssd');
   assert.equal(versionFit({ id: 'x', download_gb: 1, memory_gb: 40, fit_gb: 150 }, { ram_gb: 64, vram_gb: 24 }), 'ssd', "the catalog's own files size, not the CPU's share");
   assert.equal(versionFit({ id: 'x', download_gb: 1, memory_gb: 40, fit_gb: 60 }, { ram_gb: 64, vram_gb: 24 }), 'fits');
-  assert.equal(versionFit({ ...nvfp4, on_this_pc: 'does not fit' }, { ram_gb: 32, vram_gb: 24 }), 'ssd', 'a smaller PC still runs it, slower');
-  assert.equal(versionFit({ ...nvfp4, on_this_pc: 'tight' }, { ram_gb: 128, vram_gb: 32 }), 'fits');
 });
 
 test("no card, little memory, a Mac with too little: the same two words, never 'Doesn't fit' (owner 11-08)", () => {

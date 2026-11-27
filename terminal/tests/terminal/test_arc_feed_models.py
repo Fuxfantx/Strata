@@ -123,7 +123,7 @@ class AdoptFeedModels(unittest.TestCase):
         t = Tree(self.root, "x", ["Q4R-00001-of-00002.gguf", "Q4R-00002-of-00002.gguf"])
         cfg, problems = t.plan("q4rehearsal-a", "X", {"title": "x", "tag": "x-"})
         self.assertIsNone(cfg)
-        self.assertEqual(problems, ["Strata can write the settings itself only for the Qwen3.8-Flash-Next, Swift, Coder, Gyro, Inkling-2-Mini and Hy4-Flash files, not for q4rehearsal-a"])
+        self.assertEqual(problems, ["Strata can write the settings itself only for the Qwen3.8-Flash-Next, Swift, Coder, Gyro and Unsloth files, not for q4rehearsal-a"])
 
     def test_the_built_in_families_are_what_they_were(self):
         t = Tree(self.root, "q2_0", ["Qwen3.8-Flash-Next-Q2_0-00001-of-00002.gguf", "Qwen3.8-Flash-Next-Q2_0-00002-of-00002.gguf"])
@@ -181,34 +181,6 @@ class AppArcPath(unittest.TestCase):
         self.assertEqual(args[args.index("--family") + 1], "q4rehearsal-a")
         self.assertEqual(args[-2:], ["--backend", "sycl"])
         self.assertNotIn("--drafter", args)
-
-    def test_setup_control_mode_fetches_the_shape_engine_and_writes_its_config(self):
-        folder, data, home = self.root / "b", self.root / "Strata-data", self.root / "install"
-        for d in (folder, data, home):
-            d.mkdir()
-        (folder / "q4lite4.gguf").write_bytes(b"x")
-        fetched = []
-
-        def fake_pack(args):
-            pack = Path(args.prepare_pack)
-            (pack / "tokenizer").mkdir(parents=True, exist_ok=True)
-            (pack / "tokenizer" / "vocab.json").write_text("{}")
-            (pack / "index.txt").write_text("x")
-            return 0
-        a = mock.Mock(family="q4rehearsal-b", model="UD-Q4_K_XL-q4rehearsal-b", gguf_dir=str(folder), models_dir=None, data_dir=None, context=32768, kv="int8",
-                      port=None, host=None, api_key=None, browser=None, check=False, yes=True, move_data=False, set_default_data_dir=False, prepare_pack=None, feed=None)
-        with mock.patch.object(setup, "CONTROL", True), mock.patch.object(setup, "_CONTROL_HOME", home), \
-                mock.patch.object(setup, "data_folder_for", lambda a: (data, [])), mock.patch.object(setup, "prepare_pack_only", fake_pack), \
-                mock.patch.object(setup, "shape_engine_fetch", lambda a: fetched.append(dict(setup.SHAPE_ENGINE))), \
-                mock.patch.object(setup_config, "neutral_profile_if_other_shape", lambda shipped, first, pack, G, say=print: Path(pack) / "expert-profile-4x256.bin"), \
-                mock.patch.object(intel_app, "arc_cards", lambda root="": [dict(A750)]), \
-                mock.patch("strata_cli.launch.adopt.intel_driver", lambda: "i915"), \
-                mock.patch.object(intel_app, "supported_here", lambda platform=None: True):
-            self.assertEqual(setup.intel_control_setup(a), 0)
-        self.assertEqual(fetched, [{"shape": "q4_lite", "title": "Qwen4 Rehearsal"}])
-        cfg = json.loads((home / "strata-q4rehearsal-b-ud-q4_k_xl-q4rehearsal-b.json").read_text(encoding="utf-8"))
-        self.assertEqual((cfg["exe"], cfg["backend"], cfg["drafting"], cfg["mtp"]), ("component:strata-q4-lite", "sycl", "off", False))
-        self.assertEqual(cfg["shape_title"], "Qwen4 Rehearsal")
 
 
 if __name__ == "__main__":

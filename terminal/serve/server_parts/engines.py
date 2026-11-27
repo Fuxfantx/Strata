@@ -823,14 +823,6 @@ def parallel_args(cfg: dict, args: list[str]) -> list[str]:
         if isinstance(n, int) and not isinstance(n, bool) and n >= 1:
             args[args.index("--batch") + 1] = str(min(n, SPLIT_MAX_LANES))
         return []
-    if cfg.get("arch") in ("inkling2_loop", "inkling2", "inkling2_loop_text"):
-        # Inkling-2-Mini supports native 1..64 continuous batching (`--parallel 1|4|8|32|64`)!
-        if "--parallel" in args or "--batch" in args or "--slots" in args:
-            return []
-        n = cfg.get("parallel")
-        if isinstance(n, bool) or not isinstance(n, int) or n <= 1:
-            return []
-        return ["--parallel", str(min(n, 64))]
     if "--batch" in args or "--slots" in args:
         return []
     n = cfg.get("parallel")
@@ -856,8 +848,7 @@ _POOL_CORES_OK = re.compile(r"^[0-9]+(-[0-9]+(:[0-9]+)?)?(,[0-9]+(-[0-9]+(:[0-9]
 
 def pool_cores_args(cfg: dict, args: list[str]) -> list[str]:
     """Experimental, off by default: "pool_cores": "0,2,4,6" (or "2-14:2", or a list of numbers) in the config pins the CPU
-    expert workers to exactly those logical processors (--pool-cores; docs/DETAILS.md, "Which logical processors the CPU
-    workers use").  The engine warns about two entries on one core or the host's own and leaves out processors the process may
+    expert workers to exactly those logical processors (--pool-cores).  The engine warns about two entries on one core or the host's own and leaves out processors the process may
     not use; a text this cannot read is said here and ignored (recommend, never force).  An engine option already in the args wins."""
     value = cfg.get("pool_cores")
     if value is None or value is False or value == "" or value == []:

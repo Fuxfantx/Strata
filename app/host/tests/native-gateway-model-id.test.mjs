@@ -7,7 +7,7 @@ const listen=server=>new Promise(r=>server.listen(0,'127.0.0.1',()=>r(server.add
 const close=server=>new Promise(r=>{server.closeAllConnections();server.close(r);});
 
 test('which names are Strata catalog ids (#6778)',()=>{
-  for(const n of ['iq3_s','IQ2_XS','q2_0','ud-q4_k_xl','UD-IQ4_XS-v31','sq-15','gyro-s','inkling-2-mini-sq-10','hy4-flash-sq-64','qwen3.8-flash-next-iq3_s'])assert.equal(looksLikeStrataModelId(n),true,n);
+  for(const n of ['iq3_s','IQ2_XS','q2_0','ud-q4_k_xl','UD-IQ4_XS-v31','gyro-s','ornith-1.5-35b-a3b-q4_k_m','qwen3.8-flash-next-iq3_s'])assert.equal(looksLikeStrataModelId(n),true,n);
   for(const n of ['gpt-4o','claude-5-5-sonnet','x','local-model','llama-3.1-8b','', undefined, null, 5])assert.equal(looksLikeStrataModelId(n),false,String(n));
   assert.equal(sameModelName('Qwen3.8-Flash-Next-IQ3_S','iq3_s'),true);
   assert.equal(sameModelName('ud-iq3_xxs','iq3_xxs'),false);

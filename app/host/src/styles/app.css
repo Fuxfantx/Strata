@@ -28,7 +28,7 @@
      surface  — full panel or whole screen
      choreo   — multi-element sequences only (onboarding, first paint)
 
-   See docs/interaction-guidelines.md for the rules these implement. */
+   These implement the rules in the header above. */
 :root {
   --st-t-micro: 100ms;
   --st-t-control: 160ms;
@@ -717,7 +717,7 @@
   border-bottom: 0;
 }
 
-/* Accessibility correction, light only — see docs/design-system-notes.md §2.1.
+/* Accessibility correction, light only — see §2.1 of the design notes.
    The kit pairs `--st-accent-ink: #ffffff` with `--st-accent: #10b981`: 2.54:1,
    under AA for the 14px/700 labels on primary buttons and the user's chat
    bubble. Dark mode already pairs a dark ink with the accent fill, so light mode
@@ -6032,14 +6032,14 @@ button.menu__item:disabled { opacity: .5; cursor: default; }
 .artifact-tab:hover .artifact-tab__close, .artifact-tab:focus-within .artifact-tab__close { opacity: 1; }
 .artifact-tab__close:hover { color: var(--st-ink); background: var(--st-line-soft); }
 .subagent-row { display: flex; gap: 9px; align-items: flex-start; padding: 11px 0; }
-.subagent-row--clickable { cursor: pointer; border-radius: var(--st-r-md); padding-inline: 6px; margin-inline: -6px; transition: background 140ms ease; }
+.subagent-row--clickable { cursor: pointer; border-radius: var(--st-r-md); padding-inline: 6px; margin-inline: -6px; transition: background var(--st-t-control) ease; }
 .subagent-row--clickable:hover { background: var(--st-surface-2); }
 .subagent-row + .subagent-row { border-top: 1px solid var(--st-line-soft); }
 .subagent-row[data-panel] { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; }
 .subagent-row[data-panel] .subagent-log, .subagent-row[data-panel] .subagent-messages, .subagent-row[data-panel] .subagent-work__composer { grid-column: 1 / -1; }
 .subagent-thread__meta { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--st-ink-muted); margin-bottom: 4px; }
 .subagent-thread__meta strong { color: var(--st-ink); font-weight: 600; }
-.subagent-thread__badge { padding: 1px 6px; border-radius: 999px; background: var(--st-surface); border: 1px solid var(--st-line); font-size: 10px; }
+.subagent-thread__badge { padding: 1px 6px; border-radius: 999px; background: var(--st-surface); border: 1px solid var(--st-line); font-size: var(--st-fs-xs); }
 .subagent-thread__text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .subagent-thread .subagent-thread__item--assistant { border-left-color: var(--st-info-text); }
 .helper-window { height: 100%; min-height: 0; }
@@ -7700,16 +7700,16 @@ button.sent-quote__label { text-decoration: underline; text-underline-offset: 2p
 .askq__detail { margin: 2px 0 0; overflow-wrap: anywhere; }
 .askq__hint { margin: 4px 0 0; font-weight: 500; color: var(--st-ink-muted); }
 .askq__opts { display: flex; flex-direction: column; gap: 6px; margin-left: 44px; }
-.askq__opt { display: flex; align-items: flex-start; gap: 10px; padding: 8px 12px; border: 1px solid var(--st-line); border-radius: var(--st-r-md); background: var(--st-surface); color: var(--st-ink); font: inherit; text-align: left; cursor: pointer; transition: border-color 120ms ease, background-color 120ms ease; }
+.askq__opt { display: flex; align-items: flex-start; gap: 10px; padding: 8px 12px; border: 1px solid var(--st-line); border-radius: var(--st-r-md); background: var(--st-surface); color: var(--st-ink); font: inherit; text-align: left; cursor: pointer; transition: border-color var(--st-t-micro) ease, background-color var(--st-t-micro) ease; }
 .askq__opt:hover:not(:disabled) { border-color: var(--st-accent); background: var(--st-surface-2); }
 .askq__opt[data-on] { border-color: var(--st-accent); background: var(--st-accent-tint); }
 .askq__opt:disabled { opacity: .6; cursor: default; }
 .askq__opt-body { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
-.askq__indicator { flex: none; width: 16px; height: 16px; margin-top: 2px; border: 1.5px solid var(--st-line-strong, var(--st-line)); background: var(--st-surface); display: inline-flex; align-items: center; justify-content: center; color: #fff; transition: border-color 120ms ease, background-color 120ms ease; }
+.askq__indicator { flex: none; width: 16px; height: 16px; margin-top: 2px; border: 1.5px solid var(--st-line); background: var(--st-surface); display: inline-flex; align-items: center; justify-content: center; color: var(--st-accent-ink); transition: border-color var(--st-t-micro) ease, background-color var(--st-t-micro) ease; }
 .askq__indicator--radio { border-radius: 999px; position: relative; }
 .askq__opt[data-on] .askq__indicator--radio { border-color: var(--st-accent); }
 .askq__opt[data-on] .askq__indicator--radio::after { content: ''; width: 8px; height: 8px; border-radius: 999px; background: var(--st-accent); }
-.askq__indicator--check { border-radius: 4px; }
+.askq__indicator--check { border-radius: 6px; }
 .askq__opt[data-on] .askq__indicator--check { border-color: var(--st-accent); background: var(--st-accent); }
 .askq__own { margin-left: 44px; width: calc(100% - 44px); }
 .askq__problem { margin: 0 14px 0 44px; }

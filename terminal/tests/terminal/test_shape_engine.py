@@ -894,20 +894,20 @@ class EnsureLockWaitAndDarwinLibPath(Base):
         self.assertEqual(calls[0], 1)
 
     def test_test_start_uses_dyld_library_path_on_darwin(self):
-        pkg = self.root / "mac_hy4"
+        pkg = self.root / "mac_q4_lite"
         pkg.mkdir()
-        exe = pkg / "strata-hy4"
+        exe = pkg / "strata-q4-lite"
         exe.write_bytes(b"")
         seen = []
 
         def fake_run(cmd, **kw):
             seen.append(kw.get("env") or {})
-            return mock.Mock(returncode=0, stdout="strata-hy4 0.1.64\n", stderr="")
+            return mock.Mock(returncode=0, stdout="strata-q4-lite 0.1.64\n", stderr="")
 
         with mock.patch.object(shape_engine.sys, "platform", "darwin"), \
                 mock.patch.object(ec, "package_lib_dirs", return_value=[str(pkg)]), \
                 mock.patch("subprocess.run", side_effect=fake_run):
-            ok, msg = shape_engine._test_start(exe, shape="hy4")
+            ok, msg = shape_engine._test_start(exe, shape="q4_lite")
         self.assertTrue(ok, msg)
         self.assertIn("DYLD_LIBRARY_PATH", seen[0])
         self.assertIn(str(pkg), seen[0]["DYLD_LIBRARY_PATH"])

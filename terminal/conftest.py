@@ -80,7 +80,7 @@ if os.name != "nt" and not os.environ.get("STRATA_TEST_REAL_NVIDIA_SMI"):
 # 1.2 GB), and one on a box without internet hung for the whole timeout. Every connect and every name lookup of this process is checked:
 # loopback and local sockets pass; anything else is refused at once (ConnectionRefusedError / gaierror, which the code under test reads as
 # "offline") and the test FAILS, naming the host. A live test sets STRATA_TEST_ALLOW_NETWORK=1 itself (the
-# STRATA_LIVE_HF test class in tools/ does). Child processes are not covered (the install.sh tests use loopback servers only).
+# STRATA_LIVE_HF test class in tools/ does). Child processes are not covered (the tests use loopback servers only).
 # Three things that are not "the network" pass, named here: a UDP connect() (it only names the peer and sends nothing: tests that ask which address
 # leads out), a lookup of this computer's own host name, and the RFC 5737 documentation addresses (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24,
 # which nothing answers: a test that needs an address that cannot work); they are called (a), (b) and (c) below. Every use is counted per test and

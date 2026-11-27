@@ -36,42 +36,6 @@ DRAFTING_MODES = ("auto", "mtp", "dflash2", "off")
 #: setup.py DRAFT_VOCABS (tests/terminal/test_launch_draft_vocab.py keeps the two the same)
 DRAFT_VOCAB_MODES = ("cjk", "en", "cyrillic", "fr", "latin", "arabic")
 KV_MODES = ("int8", "q4_0", "k8v4", "fp16", "fp8", "k8v8")
-INKLING_KV_MODES_CUDA = ("fp16", "fp8", "k8v8", "k8v4")
-INKLING_KV_MODES_SAFE = ("fp16", "fp8")        # #6681: HIP/Metal/SYCL support fp16 and fp8 only (k8v4/k8v8 OOM on HIP)
-
-
-def inkling_kv_modes(backend: str | None = None) -> tuple[str, ...]:
-    """KV cache formats supported by strata-inkling for `backend` (fp16/fp8 on HIP/Metal/SYCL; fp16/fp8/k8v8/k8v4 on CUDA)."""
-    return INKLING_KV_MODES_SAFE if str(backend or "").strip().lower() in ("hip", "metal", "sycl") else INKLING_KV_MODES_CUDA
-
-
-def safe_inkling_kv(kv: str | None, backend: str | None = None) -> tuple[str | None, bool]:
-    """Return (effective_kv, clamped) for Inkling-2-Mini: clamps k8v4/k8v8 -> fp8 on HIP/Metal/SYCL (#6681)."""
-    if not kv:
-        return None, False
-    val = str(kv).strip().lower()
-    allowed = inkling_kv_modes(backend)
-    if val in allowed:
-        return val, False
-    if val in ("k8v4", "k8v8"):
-        return "fp8", True
-    return None, False
-
-
-def inkling_kv_note(kv: str | None, backend: str | None = None) -> str | None:
-    """The sentence for a `--kv` that Inkling-2-Mini does not take as it was typed: a Qwen format (int8, q4_0) or a format this card's backend lacks (k8v4 / k8v8
-    on HIP, Metal and SYCL, which use fp8 instead). None when the value goes through as it is, or none was asked. Said at every launch, never dropped quietly
-    (0.2.20 accepted `--kv k8v4` for an Inkling GGUF and wrote none: the 8-bit comparison it was meant for ran on the default)."""
-    if not kv:
-        return None
-    val = str(kv).strip().lower()
-    eff, clamped = safe_inkling_kv(val, backend)
-    allowed = ", ".join(inkling_kv_modes(backend))
-    if eff is None:
-        return f"--kv {val} is not a memory format of Inkling-2-Mini (it takes {allowed}), so the engine's own default is used."
-    if clamped:
-        return f"Inkling-2-Mini on {backend or 'this card'} does not support --kv {val} (it takes {allowed}); using --kv {eff} instead."
-    return None
 DEFAULT_PORT = 8080
 
 #: How many requests the card can answer at once (the spec's "fit to card" default): by graphics memory.
@@ -124,7 +88,7 @@ class LaunchSettings:
     """Every choice of `strata launch`. `None` means "the recommendation for this computer"."""
 
     name: str | None = None                    # the saved preset's name
-    family: str | None = None                  # catalog family id (qwen, swift, coder, unsloth, gyro, nvfp4...)
+    family: str | None = None                  # catalog family id (qwen, swift, coder, unsloth, gyro...)
     model: str | None = None                   # catalog size (IQ3_XXS ...)
     model_path: str | None = None              # "Use model files I already have": a .gguf file or a folder
     custom_id: str | None = None               # a custom build (the person's own .strata / .gguf files): its run config's id (strata-<id>.json); family / model are its base model
@@ -266,56 +230,15 @@ def check_access(s: LaunchSettings) -> list[Notice]:
     return out
 
 
-#: The most requests one engine answers at once, by model family (0221 APPTUI, from the engines: strata-inkling kMaxParallelSlots = 64; strata-hy4 has no slots;
-#: the Strata engine's batch window holds 16 rows in the CUDA and HIP builds and 8 in the others (engine/include/strata/kernels/window_limits.hpp), and more
-#: only as pipelined groups on a layer split, which a lone card does not have).
-INKLING_MAX_PARALLEL = 64
+#: The most requests one engine answers at once, by card maker (0221 APPTUI, from the engine: the Strata engine's batch window holds 16 rows in the CUDA and HIP
+#: builds and 8 in the others (engine/include/strata/kernels/window_limits.hpp), and more only as pipelined groups on a layer split, which a lone card does not have).
 QWEN_WINDOW = {"nvidia": 16, "amd": 16}
 QWEN_WINDOW_OTHER = 8
 
 
 def max_parallel(family: str | None, vendor: str | None = None) -> int:
-    """The most slots the engine of this family really runs (one card)."""
-    if family == "inkling-2-mini":
-        return INKLING_MAX_PARALLEL
-    if family == "hy4-flash":
-        return 1
+    """The most slots the engine really runs (one card)."""
     return QWEN_WINDOW.get(str(vendor or "").lower(), QWEN_WINDOW_OTHER)
-
-
-def inkling_slots_notices(s: LaunchSettings, *, vram_gb: float | None, ram_gb: float | None, vendor: str | None = None) -> list[Notice]:
-    """Inkling-2-Mini: can the card hold N conversations (--parallel N) at the chosen context? The planner's own arithmetic (strata_control/inkling_fit.py) with N slots against
-    one: an error when the slots' memory alone does not fit the card (the engine would stop at the start), a warning when the experts in graphics memory shrink."""
-    out: list[Notice] = []
-    n = int(s.parallel or 1)
-    if n <= 1 or not vram_gb or not s.model:
-        return out
-    try:
-        from strata_control import inkling_fit as F
-        if s.model not in F.BUILDS:
-            return out
-        ctx = int(s.context or F.DEFAULT_CONTEXT)
-        backend = {"amd": "hip", "intel": "sycl"}.get(str(vendor or "").lower())
-        ram = float(ram_gb or 0.0)
-        one = F.place(s.model, vram_gb, ram, False, ctx, False, parallel=1, backend=backend)
-        many = F.place(s.model, vram_gb, ram, False, ctx, False, parallel=n, backend=backend)
-        fp8 = F.auto_fp8_kv(vram_gb, ctx, n)
-        dense = F.BUILDS[s.model]["dense_gb"]
-        host_kv = (backend not in ("hip", "sycl")) and F.global_kv_gb(ctx, n, fp8_kv=fp8) > 1.5
-        need = dense + F.non_expert_gb(ctx, n, dspark=True, fp8_kv=fp8, hybrid=True, host_offload_global_kv=host_kv)
-        have = float(vram_gb) * F.GIB_TO_GB
-    except Exception:                                         # noqa: BLE001 - a plan that cannot work this out stays silent rather than wrong
-        return out
-    ctx_k = f"{ctx // 1024}K"
-    if need > have:
-        out.append(Notice("error", f"{n} requests at once at {ctx_k} need about {need:.1f} GB of graphics memory for the conversations alone (before any expert); "
-                                   f"this card has {have:.1f} GB, so the engine cannot start.",
-                          f"Use fewer requests (--parallel), a shorter context (--context), or a card with more memory. {n} at {min(ctx, 8192) // 1024}K is a smaller ask."))
-    elif many.get("vram_gb", 0.0) < one.get("vram_gb", 0.0) - 0.05 or many.get("ssd_gb", 0.0) > one.get("ssd_gb", 0.0) + 0.05:
-        out.append(Notice("warn", f"{n} requests at once at {ctx_k} leave room for {many.get('vram_gb', 0.0):.1f} GB of the model's experts in graphics memory "
-                                  f"(one request: {one.get('vram_gb', 0.0):.1f} GB); the rest runs from RAM" + (f" and the SSD ({many['ssd_gb']:.1f} GB)" if many.get("ssd_gb", 0.0) > 0.05 else "") + ".",
-                          "Each answer is slower than with fewer requests. A shorter context or fewer requests keeps more experts on the card."))
-    return out
 
 
 def check_parallel(s: LaunchSettings, *, vram_gb: float | None, fitted: int | None = None, ram_gb: float | None = None, vendor: str | None = None) -> list[Notice]:
@@ -327,17 +250,10 @@ def check_parallel(s: LaunchSettings, *, vram_gb: float | None, fitted: int | No
         out.append(Notice("error", f"{s.parallel} requests at once is outside what the engine can do (1 to {max_p}).",
                           f"Pick a number from 1 to {max_p}."))
         return out
-    if s.family == "inkling-2-mini":
-        return inkling_slots_notices(s, vram_gb=vram_gb, ram_gb=ram_gb, vendor=vendor)
-    if s.family == "hy4-flash":
-        if int(s.parallel) > 1:
-            out.append(Notice("warn", f"Hy4-Flash answers one request at a time, so --parallel {s.parallel} is not used.",
-                              "Other requests wait their turn. Inkling-2-Mini runs up to 64 at once."))
-        return out
     cap = max_parallel(s.family, vendor)
     if int(s.parallel) > cap:
         out.append(Notice("warn", f"{s.parallel} requests at once is more than this engine runs on one card: it keeps {cap} (its batch window holds {cap} requests).",
-                          "The others wait their turn. Inkling-2-Mini runs up to 64 at once; two or more cards in a layer split can run more."))
+                          "The others wait their turn. Two or more cards in a layer split can run more."))
         return out
     fitted = fit_parallel(vram_gb) if fitted is None else fitted
     if vram_gb and s.parallel > fitted:
@@ -388,7 +304,7 @@ def settings_from_pairs(pairs: list[str]) -> dict[str, str]:
 
 
 #: Options whose value is a WORD the engine reads (on, off, auto, none): the word goes through as typed (none since DeepSeek's --dspark left, #3959).
-#: --draft (Inkling-2-Mini): `on` asks for DFlash 2 by name, so the engine never leaves it out to keep the model on the card; without this the word "on" read as "the flag is present"
+#: --draft: `on` asks for the DFlash 2 drafter by name, so the engine never leaves it out to keep the model on the card; without this the word "on" read as "the flag is present"
 #: and the engine got a bare `--draft` (`strata launch --set draft=on`, the Advanced screen).
 WORD_VALUE_FLAGS: frozenset[str] = frozenset({"--draft"})
 

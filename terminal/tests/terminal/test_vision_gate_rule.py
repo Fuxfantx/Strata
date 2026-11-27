@@ -1,7 +1,7 @@
 """The picture reader's GPU gate reads our tower against the float32 reference (VitRef), not against llama.cpp's reader.
 
 tools/vision/own/gate_gpu.py: rule 1 = cosine(own GPU, float32) >= 0.999, rule 2 = no further from float32 than mtmd's GPU reader (1e-4 slack, or >= 0.9999).
-The numbers are code4217.png at 1,024 picture tokens, measured on 11-14 (RTX PRO 5000 and a Zen 3 CPU, Qwen3.8 BF16 mmproj).
+The numbers are pictures/code.png at 1,024 picture tokens, measured on 11-14 (RTX PRO 5000 and a Zen 3 CPU, Qwen3.8 BF16 mmproj).
 """
 
 import importlib.util

@@ -104,7 +104,7 @@ test('#6619: Big UMA (Strix Halo 8060S 128 GB) vs discrete R9700 (32 GB) picks b
   assert.equal(smallModel.why, 'faster');
   assert.deepEqual(smallModel.roles, { 0: 'off', 1: 'main' });
 
-  // Model needs > 32 GB (e.g. Qwen3.8 / Hy4-Flash 62 GB) -> Big UMA 8060S is Main (memory), R9700 starts Off
+  // Model needs > 32 GB (e.g. Qwen3.8 62 GB) -> Big UMA 8060S is Main (memory), R9700 starts Off
   const bigModel = R.recommend(hybrid, 'amd', { modelMemoryGb: 62 });
   assert.equal(bigModel.main, 0);
   assert.equal(bigModel.why, 'memory');
